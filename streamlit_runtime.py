@@ -41,35 +41,47 @@ class DatabricksAuthError(Exception):
 
 
 class DatabricksAuth:
+    """Databricks OAuth token cache that is safe across Streamlit reruns.
+
+    Streamlit reruns can execute async work on different event loops. Therefore
+    this object deliberately does NOT retain an AsyncClient. The access token is
+    process-cached, while each token request owns and closes its HTTP client on
+    the same event loop that created it.
+    """
+
     def __init__(self):
         self._access_token: Optional[str] = None
         self._expires_at = 0.0
-        self._client: Optional[httpx.AsyncClient] = None
-
-    async def _get_client(self):
-        if self._client is None or self._client.is_closed:
-            self._client = httpx.AsyncClient(
-                timeout=httpx.Timeout(connect=30.0, read=60.0, write=30.0, pool=10.0),
-                limits=httpx.Limits(max_connections=20, max_keepalive_connections=10, keepalive_expiry=30.0),
-            )
-        return self._client
 
     async def get_access_token(self, force_refresh: bool = False) -> str:
         if not force_refresh and self._access_token and time.time() < self._expires_at - 60:
             return self._access_token
+
         credentials = f"{settings.databricks_client_id}:{settings.databricks_client_secret}"
         encoded = base64.b64encode(credentials.encode("ascii")).decode("ascii")
-        response = await (await self._get_client()).post(
-            f"{settings.databricks_host}/oidc/v1/token",
-            headers={"Authorization": f"Basic {encoded}", "Content-Type": "application/x-www-form-urlencoded"},
-            data={"grant_type": "client_credentials", "scope": "genie"},
-        )
+
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(connect=30.0, read=60.0, write=30.0, pool=10.0)
+        ) as client:
+            response = await client.post(
+                f"{settings.databricks_host}/oidc/v1/token",
+                headers={
+                    "Authorization": f"Basic {encoded}",
+                    "Content-Type": "application/x-www-form-urlencoded",
+                },
+                data={"grant_type": "client_credentials", "scope": "genie"},
+            )
+
         if response.status_code >= 400:
-            raise DatabricksAuthError(f"Databricks OAuth failed: HTTP {response.status_code}: {response.text[:1000]}")
+            raise DatabricksAuthError(
+                f"Databricks OAuth failed: HTTP {response.status_code}: {response.text[:1000]}"
+            )
+
         payload = response.json()
         token = payload.get("access_token")
         if not token:
             raise DatabricksAuthError("Databricks OAuth response did not contain access_token.")
+
         self._access_token = token
         self._expires_at = time.time() + int(payload.get("expires_in", 3600))
         return token
@@ -79,9 +91,8 @@ class DatabricksAuth:
         self._expires_at = 0.0
 
     async def close(self):
-        if self._client and not self._client.is_closed:
-            await self._client.aclose()
-        self._client = None
+        # Kept for compatibility with the existing client lifecycle.
+        return None
 
 
 @st.cache_resource
