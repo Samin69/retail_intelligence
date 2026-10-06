@@ -786,71 +786,24 @@ def find_source_table(viz: Dict[str, Any], tables: List[Dict[str, Any]]) -> Opti
 
 
 def build_chart_spec(table: Dict[str, Any], viz: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """Build the chart spec from the actual Genie query-result table.
-
-    This is deliberately data-driven. It never invents data and never chooses a
-    random numeric column. The dimension is selected from the returned columns
-    and the metric columns are selected from the returned numeric values.
-    """
+    """Port the exact chart-data selection used by the previously working Plotly renderer."""
     columns = [str(c) for c in (table.get("columns") or [])]
-    rows = normalize_rows(columns, (table.get("rows") or [])[:200]) if columns else []
+    rows = normalize_rows(columns, (table.get("rows") or [])[:50]) if columns else []
     if len(columns) < 2 or not rows:
         return None
 
-    def cell_numeric(value: Any) -> bool:
-        if value is None or value == "":
-            return False
-        text = str(value).strip().replace(",", "")
-        return bool(_NUMERIC_RE.match(text)) and math.isfinite(float(text))
-
-    def cell_date(value: Any) -> bool:
-        text = str(value or "").strip()
-        return bool(
-            re.match(r"^\d{4}-\d{2}-\d{2}(?:[T ]|$)", text)
-            or re.match(r"^\d{4}-\d{2}(?:-|$)", text)
-            or re.match(r"^\d{4}/\d{2}/\d{2}", text)
-        )
-
-    # Find all numeric columns, regardless of their position in the result.
     numeric_columns = []
-    for c, _column in enumerate(columns):
+    for c in range(1, len(columns)):
         values = [row[c] for row in rows if row[c] not in (None, "")]
-        if values and sum(cell_numeric(v) for v in values) >= max(1, int(len(values) * 0.8)):
+        if values and all(is_numeric_value(v) for v in values):
             numeric_columns.append(c)
-
     if not numeric_columns:
         return None
 
-    # Prefer an actual temporal dimension, then the first non-numeric dimension.
-    date_columns = []
-    for c, _column in enumerate(columns):
-        values = [row[c] for row in rows if row[c] not in (None, "")]
-        if values and sum(cell_date(v) for v in values) >= max(1, int(len(values) * 0.8)):
-            date_columns.append(c)
-
-    if date_columns:
-        dimension_index = date_columns[0]
-    else:
-        non_numeric = [c for c in range(len(columns)) if c not in numeric_columns]
-        dimension_index = non_numeric[0] if non_numeric else 0
-
-    # If every returned column is numeric, the first column is treated as the
-    # x-axis and the remaining numeric columns are metrics. This is deterministic
-    # and is preferable to refusing to render a perfectly valid result.
-    metric_columns = [c for c in numeric_columns if c != dimension_index]
-    if not metric_columns:
-        return None
-
-    dimension_values = [row[dimension_index] for row in rows]
-    date_axis = all(cell_date(v) for v in dimension_values if v not in (None, ""))
-    monthly = date_axis and all(
-        re.match(r"^\d{4}-\d{2}-01", str(v)) for v in dimension_values if v not in (None, "")
-    )
-
-    hint = " ".join(
-        str(viz.get(k) or "") for k in ("chart_type", "type", "title")
-    ).lower()
-    chart_type = "line" if (date_axis or re.search(r"line|trend|over time|daily|weekly|monthly", hint)) else "bar"
+    date_axis = all(is_iso_date(row[0]) for row in rows)
+    monthly = date_axis and all(re.match(r"^\d{4}-\d{2}-01", str(row[0])) for row in rows)
+    hint = " ".join(str(viz.get(k) or "") for k in ("chart_type", "type", "title")).lower()
+    chart_type = "line" if (date_axis or re.search(r"line|trend", hint)) else "bar"
 
     title_text = str(viz.get("title") or "").lower()
     title_groups = [
@@ -858,50 +811,31 @@ def build_chart_spec(table: Dict[str, Any], viz: Dict[str, Any]) -> Optional[Dic
         for group, words in enumerate(_SERIES_GROUPS)
         if any(re.search(rf"\b{re.escape(w)}s?\b", title_text) for w in words)
     ]
-
-    preferred = [
-        c for c in metric_columns
-        if _series_group(columns[c]) in title_groups
-    ]
+    preferred = [c for c in numeric_columns if _series_group(columns[c]) in title_groups]
     if not preferred:
-        first_kind = column_kind(columns[metric_columns[0]])
-        preferred = [
-            c for c in metric_columns
-            if column_kind(columns[c]) == first_kind
-        ]
-    if not preferred:
-        preferred = [metric_columns[0]]
+        first_kind = column_kind(columns[numeric_columns[0]])
+        preferred = [c for c in numeric_columns if column_kind(columns[c]) == first_kind]
 
     preferred_set = set(preferred)
-    ordered = preferred + [c for c in metric_columns if c not in preferred_set]
+    first_kind = column_kind(columns[preferred[0]])
+    ordered = preferred + [c for c in numeric_columns if c not in preferred_set]
 
-    datasets = []
-    for c in ordered[:5]:
-        data = []
-        for row in rows:
-            value = row[c]
-            if cell_numeric(value):
-                data.append(float(str(value).replace(",", "")))
-            else:
-                data.append(None)
-        datasets.append({
+    datasets = [
+        {
             "label": columns[c],
             "kind": column_kind(columns[c]),
             "hidden": c not in preferred_set,
-            "data": data,
-        })
-
-    if not datasets:
-        return None
-
+            "data": [float(row[c]) if is_numeric_value(row[c]) else None for row in rows],
+        }
+        for c in ordered[:5]
+    ]
     return {
         "type": chart_type,
-        "labels": [format_chart_label(row[dimension_index], monthly) for row in rows],
+        "labels": [format_chart_label(row[0], monthly) for row in rows],
         "datasets": datasets,
-        "first_kind": datasets[0]["kind"],
+        "first_kind": first_kind,
         "horizontal": chart_type == "bar" and len(rows) > 12,
     }
-
 
 def nice_ticks(vmin: float, vmax: float, target: int = 5) -> Optional[List[float]]:
     if not (math.isfinite(vmin) and math.isfinite(vmax)) or vmax <= vmin:
@@ -955,7 +889,7 @@ html, body {{ margin:0; padding:0; background:#fff; font-family:Inter,-apple-sys
   function formatValue(value, kind) {{
     if (value === null || value === undefined || Number.isNaN(Number(value))) return "—";
     const n = Number(value);
-    if (kind === "percentage") return n.toLocaleString("en-IN", {{maximumFractionDigits:2}}) + "%";
+    if (kind === "percent") return n.toLocaleString("en-IN", {{maximumFractionDigits:2}}) + "%";
     if (kind === "currency") return "₹" + n.toLocaleString("en-IN", {{maximumFractionDigits:2}});
     if (kind === "quantity") return n.toLocaleString("en-IN", {{maximumFractionDigits:2}});
     return n.toLocaleString("en-IN", {{maximumFractionDigits:2}});
