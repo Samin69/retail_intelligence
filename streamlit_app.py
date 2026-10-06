@@ -786,53 +786,119 @@ def find_source_table(viz: Dict[str, Any], tables: List[Dict[str, Any]]) -> Opti
 
 
 def build_chart_spec(table: Dict[str, Any], viz: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Build the chart spec from the actual Genie query-result table.
+
+    This is deliberately data-driven. It never invents data and never chooses a
+    random numeric column. The dimension is selected from the returned columns
+    and the metric columns are selected from the returned numeric values.
+    """
     columns = [str(c) for c in (table.get("columns") or [])]
-    rows = normalize_rows(columns, (table.get("rows") or [])[:50]) if columns else []
+    rows = normalize_rows(columns, (table.get("rows") or [])[:200]) if columns else []
     if len(columns) < 2 or not rows:
         return None
 
+    def cell_numeric(value: Any) -> bool:
+        if value is None or value == "":
+            return False
+        text = str(value).strip().replace(",", "")
+        return bool(_NUMERIC_RE.match(text)) and math.isfinite(float(text))
+
+    def cell_date(value: Any) -> bool:
+        text = str(value or "").strip()
+        return bool(
+            re.match(r"^\d{4}-\d{2}-\d{2}(?:[T ]|$)", text)
+            or re.match(r"^\d{4}-\d{2}(?:-|$)", text)
+            or re.match(r"^\d{4}/\d{2}/\d{2}", text)
+        )
+
+    # Find all numeric columns, regardless of their position in the result.
     numeric_columns = []
-    for c in range(1, len(columns)):
+    for c, _column in enumerate(columns):
         values = [row[c] for row in rows if row[c] not in (None, "")]
-        if values and all(is_numeric_value(v) for v in values):
+        if values and sum(cell_numeric(v) for v in values) >= max(1, int(len(values) * 0.8)):
             numeric_columns.append(c)
+
     if not numeric_columns:
         return None
 
-    date_axis = all(is_iso_date(row[0]) for row in rows)
-    monthly = date_axis and all(re.match(r"^\d{4}-\d{2}-01", str(row[0])) for row in rows)
-    hint = " ".join(str(viz.get(k) or "") for k in ("chart_type", "type", "title")).lower()
-    chart_type = "line" if (date_axis or re.search(r"line|trend", hint)) else "bar"
+    # Prefer an actual temporal dimension, then the first non-numeric dimension.
+    date_columns = []
+    for c, _column in enumerate(columns):
+        values = [row[c] for row in rows if row[c] not in (None, "")]
+        if values and sum(cell_date(v) for v in values) >= max(1, int(len(values) * 0.8)):
+            date_columns.append(c)
+
+    if date_columns:
+        dimension_index = date_columns[0]
+    else:
+        non_numeric = [c for c in range(len(columns)) if c not in numeric_columns]
+        dimension_index = non_numeric[0] if non_numeric else 0
+
+    # If every returned column is numeric, the first column is treated as the
+    # x-axis and the remaining numeric columns are metrics. This is deterministic
+    # and is preferable to refusing to render a perfectly valid result.
+    metric_columns = [c for c in numeric_columns if c != dimension_index]
+    if not metric_columns:
+        return None
+
+    dimension_values = [row[dimension_index] for row in rows]
+    date_axis = all(cell_date(v) for v in dimension_values if v not in (None, ""))
+    monthly = date_axis and all(
+        re.match(r"^\d{4}-\d{2}-01", str(v)) for v in dimension_values if v not in (None, "")
+    )
+
+    hint = " ".join(
+        str(viz.get(k) or "") for k in ("chart_type", "type", "title")
+    ).lower()
+    chart_type = "line" if (date_axis or re.search(r"line|trend|over time|daily|weekly|monthly", hint)) else "bar"
 
     title_text = str(viz.get("title") or "").lower()
     title_groups = [
         group
         for group, words in enumerate(_SERIES_GROUPS)
-        if any(re.search(rf"\b{w}s?\b", title_text) for w in words)
+        if any(re.search(rf"\b{re.escape(w)}s?\b", title_text) for w in words)
     ]
-    preferred = [c for c in numeric_columns if _series_group(columns[c]) in title_groups]
+
+    preferred = [
+        c for c in metric_columns
+        if _series_group(columns[c]) in title_groups
+    ]
     if not preferred:
-        first_kind = column_kind(columns[numeric_columns[0]])
-        preferred = [c for c in numeric_columns if column_kind(columns[c]) == first_kind]
+        first_kind = column_kind(columns[metric_columns[0]])
+        preferred = [
+            c for c in metric_columns
+            if column_kind(columns[c]) == first_kind
+        ]
+    if not preferred:
+        preferred = [metric_columns[0]]
 
     preferred_set = set(preferred)
-    first_kind = column_kind(columns[preferred[0]])
-    ordered = preferred + [c for c in numeric_columns if c not in preferred_set]
+    ordered = preferred + [c for c in metric_columns if c not in preferred_set]
 
-    datasets = [
-        {
+    datasets = []
+    for c in ordered[:5]:
+        data = []
+        for row in rows:
+            value = row[c]
+            if cell_numeric(value):
+                data.append(float(str(value).replace(",", "")))
+            else:
+                data.append(None)
+        datasets.append({
             "label": columns[c],
             "kind": column_kind(columns[c]),
             "hidden": c not in preferred_set,
-            "data": [float(row[c]) if is_numeric_value(row[c]) else None for row in rows],
-        }
-        for c in ordered[:5]
-    ]
+            "data": data,
+        })
+
+    if not datasets:
+        return None
+
     return {
         "type": chart_type,
-        "labels": [format_chart_label(row[0], monthly) for row in rows],
+        "labels": [format_chart_label(row[dimension_index], monthly) for row in rows],
         "datasets": datasets,
-        "first_kind": first_kind,
+        "first_kind": datasets[0]["kind"],
         "horizontal": chart_type == "bar" and len(rows) > 12,
     }
 
@@ -867,7 +933,7 @@ def _chart_js_html(spec: Dict[str, Any], title: str) -> str:
 <html>
 <head>
 <meta charset="utf-8">
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<script data-chartjs="tns" src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
 <style>
 html, body {{ margin:0; padding:0; background:#fff; font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }}
 .chart-shell {{ width:100%; box-sizing:border-box; background:#fff; border:1px solid #e5e7eb; border-radius:12px; padding:18px 18px 12px; }}
@@ -995,8 +1061,36 @@ html, body {{ margin:0; padding:0; background:#fff; font-family:Inter,-apple-sys
     new Chart(document.getElementById("tnsChart"), config);
   }}
 
-  if (typeof Chart !== "undefined") init();
-  else setTimeout(init, 100);
+  // Streamlit runs this document inside an iframe. Do not assume that the
+  // external Chart.js script has finished loading after an arbitrary 100 ms
+  // delay. Wait for the script to load, then initialize. A timeout is kept
+  // only to surface a real CDN/network failure instead of a blank chart.
+  let initialized = false;
+  function startChart() {{
+    if (initialized) return;
+    if (typeof Chart === "undefined") return;
+    initialized = true;
+    init();
+  }}
+
+  const chartScript = document.querySelector('script[data-chartjs="tns"]');
+  if (chartScript) {{
+    chartScript.addEventListener("load", startChart, {{ once: true }});
+    chartScript.addEventListener("error", function() {{
+      document.querySelector(".chart-shell").innerHTML =
+        '<div class="error">Chart.js could not be loaded. The browser could not reach the Chart.js CDN.</div>';
+    }}, {{ once: true }});
+  }}
+
+  if (typeof Chart !== "undefined") startChart();
+  else setTimeout(function() {{
+    if (!initialized && typeof Chart === "undefined") {{
+      document.querySelector(".chart-shell").innerHTML =
+        '<div class="error">Chart.js did not load. Please check the Streamlit deployment network policy or browser console.</div>';
+    }} else {{
+      startChart();
+    }}
+  }}, 10000);
 }})();
 </script>
 </body>
