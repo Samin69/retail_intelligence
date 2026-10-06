@@ -6,6 +6,11 @@ import io
 import logging
 import math
 import re
+import base64
+import hashlib
+import hmac
+import json
+import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -156,22 +161,7 @@ def inject_css():
         .login-heading {text-align:center;}
 
         /* ---------- chat composer ---------- */
-        /* Keep the Streamlit composer aligned with the same content column as
-           the chat cards instead of stretching it across the viewport. */
-        [data-testid="stBottom"] {
-            background:#f5f7fb !important;
-            border-top:0 !important;
-        }
-        [data-testid="stBottom"] > div {
-            max-width:1024px !important;
-            width:calc(100% - 32px) !important;
-            margin:0 auto !important;
-            padding:0 0 12px 0 !important;
-        }
-        [data-testid="stBottom"] [data-testid="stChatInput"] {
-            width:100% !important;
-            margin:0 !important;
-        }
+        [data-testid="stBottom"], [data-testid="stBottom"] > div {background:#f5f7fb !important;}
         [data-testid="stChatInput"] {
             background:#ffffff !important; border:1px solid #d1d5db !important;
             border-radius:14px !important; box-shadow:0 4px 15px rgba(0,0,0,.05) !important;
@@ -309,7 +299,52 @@ def call_genie(coro_factory):
 
 
 def check_credentials(username: str, password: str) -> bool:
-    return username == settings.app_username and password == settings.app_password
+    return hmac.compare_digest(username, settings.app_username) and hmac.compare_digest(password, settings.app_password)
+
+
+def _auth_secret() -> bytes:
+    secret = getattr(settings, "app_auth_secret", None) or settings.app_password
+    return str(secret).encode("utf-8")
+
+
+def _make_auth_token(username: str) -> str:
+    payload = {"u": username, "exp": int(time.time()) + 30 * 24 * 3600}
+    raw = base64.urlsafe_b64encode(json.dumps(payload, separators=(",", ":")).encode()).decode().rstrip("=")
+    sig = hmac.new(_auth_secret(), raw.encode(), hashlib.sha256).hexdigest()
+    return f"{raw}.{sig}"
+
+
+def _read_auth_token() -> Optional[str]:
+    token = st.query_params.get("tns_auth")
+    if not token or "." not in token:
+        return None
+    raw, sig = token.rsplit(".", 1)
+    expected = hmac.new(_auth_secret(), raw.encode(), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(sig, expected):
+        return None
+    try:
+        padded = raw + "=" * (-len(raw) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(padded.encode()).decode())
+        username = str(payload.get("u") or "")
+        if username != settings.app_username or int(payload.get("exp", 0)) < int(time.time()):
+            return None
+        return username
+    except Exception:
+        return None
+
+
+def set_authenticated(username: str):
+    st.session_state.authenticated = True
+    st.session_state.username = username
+    st.query_params["tns_auth"] = _make_auth_token(username)
+
+
+def clear_authenticated():
+    st.session_state.clear()
+    try:
+        del st.query_params["tns_auth"]
+    except Exception:
+        pass
 
 
 def ensure_store():
@@ -333,50 +368,13 @@ def normalize_name(name: Any) -> str:
 def is_numeric_value(value: Any) -> bool:
     if value is None or value == "":
         return False
-    if isinstance(value, (int, float)) and not isinstance(value, bool):
-        try:
-            return math.isfinite(float(value))
-        except (TypeError, ValueError):
-            return False
     text = str(value).strip()
-    if _NUMERIC_RE.match(text):
-        try:
-            return math.isfinite(float(text))
-        except ValueError:
-            return False
-    # Accept display-formatted numeric values as a charting fallback.
-    # Examples: 4K, 2.5M, ₹1,23,456, 4,000, 12.5%.
-    cleaned = text.replace(",", "").replace("₹", "").replace("%", "").strip()
-    multiplier = 1.0
-    if cleaned and cleaned[-1:].upper() in {"K", "M", "B", "L", "C"}:
-        suffix = cleaned[-1].upper()
-        cleaned = cleaned[:-1].strip()
-        multiplier = {"K": 1_000.0, "M": 1_000_000.0, "B": 1_000_000_000.0,
-                      "L": 100_000.0, "C": 10_000_000.0}[suffix]
-    try:
-        return math.isfinite(float(cleaned) * multiplier)
-    except (TypeError, ValueError):
+    if not _NUMERIC_RE.match(text):
         return False
-
-
-def numeric_value(value: Any) -> Optional[float]:
-    if value is None or value == "":
-        return None
     try:
-        if isinstance(value, (int, float)) and not isinstance(value, bool):
-            number = float(value)
-            return number if math.isfinite(number) else None
-        text = str(value).strip().replace(",", "").replace("₹", "").replace("%", "").strip()
-        multiplier = 1.0
-        if text and text[-1:].upper() in {"K", "M", "B", "L", "C"}:
-            suffix = text[-1].upper()
-            text = text[:-1].strip()
-            multiplier = {"K": 1_000.0, "M": 1_000_000.0, "B": 1_000_000_000.0,
-                          "L": 100_000.0, "C": 10_000_000.0}[suffix]
-        number = float(text) * multiplier
-        return number if math.isfinite(number) else None
-    except (TypeError, ValueError):
-        return None
+        return math.isfinite(float(text))
+    except ValueError:
+        return False
 
 
 def is_quantity_column(name: Any) -> bool:
@@ -472,35 +470,6 @@ def format_chart_value(value: Any, kind: str) -> str:
         return format_indian_currency(value)
     formatted = format_plain_number(value)
     return f"{formatted}%" if kind == "percent" else formatted
-
-
-def format_compact_chart_value(value: Any, kind: str) -> str:
-    """Compact chart labels/ticks so scales stay readable at a glance."""
-    if value is None:
-        return "—"
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        return str(value)
-
-    sign = "-" if number < 0 else ""
-    number = abs(number)
-    if kind == "percent":
-        return f"{sign}{number:,.0f}%"
-
-    if number >= 1_000_000:
-        text = f"{number / 1_000_000:.1f}M"
-    elif number >= 1_000:
-        text = f"{number / 1_000:.1f}K"
-    elif number >= 100:
-        text = f"{number:,.0f}"
-    elif number >= 10:
-        text = f"{number:,.1f}".rstrip("0").rstrip(".")
-    else:
-        text = f"{number:,.2f}".rstrip("0").rstrip(".")
-
-    prefix = "₹" if kind == "currency" else ""
-    return f"{sign}{prefix}{text}"
 
 
 def unique_columns(columns: List[str]) -> List[str]:
@@ -861,13 +830,24 @@ def format_chart_label(value: Any, monthly: bool) -> str:
 
 
 def find_source_table(viz: Dict[str, Any], tables: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    for attachment_id in (viz.get("query_attachment_id"), viz.get("attachment_id")):
-        if not attachment_id:
-            continue
+    # A Genie visualization explicitly identifies the query attachment that
+    # produced it. Never guess from the last table: that can silently draw an
+    # unrelated chart or make a valid visualization appear to be missing.
+    source_id = viz.get("query_attachment_id")
+    if source_id:
+        source_norm = normalize_source_id(source_id)
         for table in tables:
-            if table.get("attachment_id") == attachment_id:
+            if normalize_source_id(table.get("attachment_id")) == source_norm:
                 return table
-    return tables[-1] if tables else None
+    # Some Genie responses omit query_attachment_id but still use the same
+    # attachment id for a visualization. Only use that exact match.
+    viz_id = viz.get("attachment_id")
+    if viz_id:
+        viz_norm = normalize_source_id(viz_id)
+        for table in tables:
+            if normalize_source_id(table.get("attachment_id")) == viz_norm:
+                return table
+    return None
 
 
 def build_chart_spec(table: Dict[str, Any], viz: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -878,8 +858,8 @@ def build_chart_spec(table: Dict[str, Any], viz: Dict[str, Any]) -> Optional[Dic
 
     numeric_columns = []
     for c in range(1, len(columns)):
-        values = [numeric_value(row[c]) for row in rows if row[c] not in (None, "")]
-        if values and all(v is not None for v in values):
+        values = [row[c] for row in rows if row[c] not in (None, "")]
+        if values and all(is_numeric_value(v) for v in values):
             numeric_columns.append(c)
     if not numeric_columns:
         return None
@@ -908,11 +888,8 @@ def build_chart_spec(table: Dict[str, Any], viz: Dict[str, Any]) -> Optional[Dic
         {
             "label": columns[c],
             "kind": column_kind(columns[c]),
-            # All Genie result series are visible by default. Users can still
-            # toggle individual series from the legend, but no data is hidden
-            # on first render.
-            "hidden": False,
-            "data": [numeric_value(row[c]) for row in rows],
+            "hidden": c not in preferred_set,
+            "data": [float(row[c]) if is_numeric_value(row[c]) else None for row in rows],
         }
         for c in ordered[:5]
     ]
@@ -961,91 +938,46 @@ def build_figure(spec: Dict[str, Any]):
         if spec["type"] == "line":
             fig.add_trace(go.Scatter(
                 x=labels, y=dataset["data"], mode="lines+markers",
-                line=dict(color=color, width=3),
-                marker=dict(color=color, size=7, line=dict(width=1, color="#ffffff")),
+                line=dict(color=color, width=2), marker=dict(color=color, size=6),
                 connectgaps=False, **common,
             ))
         elif horizontal:
-            # Put labels just outside the bars. This avoids the dense,
-            # overlapping text produced by Plotly's automatic placement on
-            # grouped horizontal bars. The axis range is padded below so the
-            # labels have room to breathe.
-            fig.add_trace(go.Bar(
-                y=labels, x=dataset["data"], orientation="h",
-                marker=dict(color=color, line=dict(width=0)),
-                **common,
-            ))
+            fig.add_trace(go.Bar(y=labels, x=dataset["data"], orientation="h",
+                                 marker_color=color, **common))
         else:
-            fig.add_trace(go.Bar(
-                x=labels, y=dataset["data"],
-                marker=dict(color=color, line=dict(width=0)),
-                **common,
-            ))
+            fig.add_trace(go.Bar(x=labels, y=dataset["data"], marker_color=color, **common))
 
     visible_values = [
         v for ds in spec["datasets"] if not ds["hidden"] for v in ds["data"] if v is not None
     ]
-    value_axis: Dict[str, Any] = dict(
-        gridcolor="#e5e7eb", gridwidth=1, zeroline=True, zerolinecolor="#cbd5e1",
-        tickfont=dict(color="#344054", size=11),
-        title_font=dict(color="#172033", size=12),
-        linecolor="#d0d5dd", linewidth=1,
-    )
+    value_axis: Dict[str, Any] = dict(gridcolor="#eef0f3", zeroline=True, zerolinecolor="#d1d5db")
     if visible_values:
         ticks = nice_ticks(min(0.0, min(visible_values)), max(0.0, max(visible_values)))
         if ticks:
             value_axis.update(
                 tickvals=ticks,
-                ticktext=[format_compact_chart_value(t, spec["first_kind"]) for t in ticks],
-                tickangle=0,
-                nticks=min(7, len(ticks)),
+                ticktext=[format_chart_value(t, spec["first_kind"]) for t in ticks],
             )
-
     category_axis: Dict[str, Any] = dict(
         type="category", categoryorder="array", categoryarray=labels,
         automargin=True, showgrid=False,
-        tickfont=dict(color="#344054", size=11),
-        linecolor="#d0d5dd", linewidth=1,
     )
 
-    longest_label = max((len(str(label)) for label in labels), default=0)
-    if horizontal:
-        # Give long vendor/category labels real room instead of letting Plotly
-        # squeeze them against the plot area.
-        left_margin = min(430, max(150, longest_label * 6 + 35))
-        height = max(430, min(900, len(labels) * 31 + 130))
-        margin = dict(l=left_margin, r=55, t=80, b=55)
-    else:
-        margin = dict(l=70, r=35, t=75, b=75)
-        height = 390
-
+    height = max(340, len(labels) * 24 + 90) if horizontal else 340
     fig.update_layout(
         template="plotly_white",
         height=height,
-        margin=margin,
+        margin=dict(l=10, r=10, t=30, b=10),
         paper_bgcolor="#ffffff",
         plot_bgcolor="#ffffff",
         showlegend=len(spec["datasets"]) > 1,
-        legend=dict(
-            orientation="h", yanchor="bottom", y=1.01,
-            xanchor="left", x=0,
-            font=dict(color="#344054", size=11),
-            bgcolor="rgba(255,255,255,0)",
-        ),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
         barmode="group",
-        bargap=0.28,
-        font=dict(family="Inter, -apple-system, Segoe UI, sans-serif", size=12, color="#172033"),
-        hoverlabel=dict(bgcolor="#111827", font_color="#ffffff", font_size=12),
+        bargap=0.25,
+        font=dict(family="Inter, -apple-system, Segoe UI, sans-serif", size=12, color="#374151"),
+        hoverlabel=dict(bgcolor="#111827", font_color="#ffffff"),
     )
     if horizontal:
-        # Keep a clean quantitative scale. Data labels are intentionally
-        # omitted from bars; values remain available through hover.
-        if visible_values:
-            positive_max = max(visible_values)
-            negative_min = min(visible_values)
-            span = max(abs(positive_max), abs(negative_min), 1.0)
-            pad = span * 0.05
-            value_axis["range"] = [min(0.0, negative_min) - pad * 0.10, positive_max + pad]
         fig.update_xaxes(**value_axis)
         fig.update_yaxes(autorange="reversed", **category_axis)
     else:
@@ -1072,44 +1004,34 @@ def render_visualization(
         st.markdown(f"**{viz.get('title') or 'Visualization'}**")
         table = find_source_table(viz, tables)
 
-        if go is not None and table:
+        if table:
             try:
                 spec = build_chart_spec(table, viz)
                 if spec:
-                    figure = build_figure(spec)
-                    wide(
-                        st.plotly_chart,
-                        figure,
-                        key=f"chart_{key}",
-                        config={
-                            "displaylogo": False,
-                            "responsive": True,
-                            "scrollZoom": True,
-                        },
-                    )
+                    if go is not None:
+                        figure = build_figure(spec)
+                        wide(st.plotly_chart, figure, key=f"chart_{key}", config={"displaylogo": False})
+                    else:
+                        # Plotly is optional. Keep charts functional even if
+                        # a deployment omitted the Plotly package.
+                        frame = pd.DataFrame({
+                            "Category": spec["labels"],
+                            **{ds["label"]: ds["data"] for ds in spec["datasets"] if not ds["hidden"]},
+                        }).set_index("Category")
+                        if spec["type"] == "line":
+                            wide(st.line_chart, frame, height=360)
+                        else:
+                            wide(st.bar_chart, frame, height=max(360, len(frame) * 28 if spec["horizontal"] else 360))
                     st.caption(f"Source: {table.get('title') or 'Query result'}")
                     with st.expander("View data"):
                         render_table(table, conversation_id, message_id, f"{key}_data")
-
-                    # Keep Genie's native visualization available as the exact
-                    # original rendering/download; it is an alternate view,
-                    # not a replacement for the clear interactive chart above.
-                    attachment_id = viz.get("attachment_id")
-                    if attachment_id and message_id:
-                        try:
-                            image = fetch_visualization_png(conversation_id, message_id, attachment_id)
-                            st.download_button(
-                                "⬇ Original Genie chart (PNG)",
-                                data=image,
-                                file_name="TNS_genie_visualization.png",
-                                mime="image/png",
-                                key=f"viz_original_dl_{key}",
-                            )
-                        except Exception as exc:
-                            logger.debug("Original Genie visualization unavailable: %s", exc)
                     return
             except Exception as exc:
-                logger.warning("Plotly chart failed; retaining native Genie visualization: %s", exc)
+                logger.exception("Query-result chart rendering failed: %s", exc)
+                st.warning(f"Could not render the chart from the Genie query result: {exc}")
+
+        # Only use the Databricks PNG when there is no usable query result.
+        # It is a true fallback, never the primary chart renderer.
 
         attachment_id = viz.get("attachment_id")
         if not attachment_id or not message_id:
@@ -1306,8 +1228,7 @@ def login_screen():
         submitted = wide(st.form_submit_button, "Sign in")
     if submitted:
         if check_credentials(username.strip(), password):
-            st.session_state.authenticated = True
-            st.session_state.username = username.strip()
+            set_authenticated(username.strip())
             st.session_state.active_chat_id = None
             st.rerun()
         else:
@@ -1359,7 +1280,7 @@ def render_sidebar():
         st.divider()
         st.caption(f"Signed in as {st.session_state.username}")
         if wide(st.button, "Logout", key="logout"):
-            st.session_state.clear()
+            clear_authenticated()
             st.rerun()
 
 
@@ -1412,7 +1333,10 @@ def main_app():
 
 
 if "authenticated" not in st.session_state:
-    st.session_state.authenticated = False
+    restored_user = _read_auth_token()
+    st.session_state.authenticated = bool(restored_user)
+    if restored_user:
+        st.session_state.username = restored_user
 if "pending_prompt" not in st.session_state:
     st.session_state.pending_prompt = ""
 
