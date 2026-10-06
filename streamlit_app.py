@@ -1151,58 +1151,27 @@ def build_figure(spec: Dict[str, Any]):
                 tickvals=ticks,
                 ticktext=[format_chart_value(t, spec["first_kind"]) for t in ticks],
             )
-    # Explicitly style category labels as well as the value axis. Plotly charts
-    # are rendered inside an iframe, so the surrounding Streamlit CSS cannot
-    # reliably control SVG text color. Keep all chart typography explicit here.
-    max_label_len = max((len(str(label)) for label in labels), default=0)
-    category_font_size = 11 if max_label_len <= 34 else 10
     category_axis: Dict[str, Any] = dict(
-        type="category",
-        categoryorder="array",
-        categoryarray=labels,
-        automargin=True,
-        showgrid=False,
-        tickfont=dict(
-            family="Inter, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif",
-            size=category_font_size,
-            color="#344054",
-        ),
-        tickcolor="#98A2B3",
-        linecolor="#D0D5DD",
-        showline=True,
+        type="category", categoryorder="array", categoryarray=labels,
+        automargin=True, showgrid=False,
     )
 
-    height = max(360, len(labels) * 27 + 105) if horizontal else 380
+    height = max(340, len(labels) * 24 + 90) if horizontal else 340
     visible_count = sum(1 for dataset in spec["datasets"] if not dataset["hidden"])
-    # Horizontal charts need substantially more left room for vendor/store/product
-    # names. Without this, Plotly compresses/clips the category labels.
-    if horizontal:
-        left_margin = min(430, max(250, max_label_len * 6.2))
-        top_margin = 78
-        bottom_margin = 42
-    else:
-        left_margin = 78
-        top_margin = 68
-        bottom_margin = 76 if len(labels) > 10 else 58
-
     fig.update_layout(
         template="plotly_white",
         height=max(380, height),
-        margin=dict(l=left_margin, r=30, t=top_margin, b=bottom_margin),
+        margin=dict(l=62, r=24, t=58, b=62),
         paper_bgcolor="#ffffff",
         plot_bgcolor="#ffffff",
         showlegend=visible_count > 1 or len(spec["datasets"]) > 1,
         legend=dict(
             orientation="h",
-            yanchor="bottom", y=1.015,
+            yanchor="bottom", y=1.02,
             xanchor="left", x=0,
             bgcolor="rgba(255,255,255,0)",
             borderwidth=0,
-            font=dict(
-                family="Inter, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif",
-                size=12,
-                color="#344054",
-            ),
+            font=dict(size=12, color="#667085"),
             itemclick="toggle",
             itemdoubleclick="toggleothers",
         ),
@@ -1215,58 +1184,21 @@ def build_figure(spec: Dict[str, Any]):
         dragmode="pan",
     )
     if horizontal:
-        fig.update_xaxes(
-            **value_axis,
-            title_font=dict(size=12, color="#344054"),
-            tickfont=dict(
-                family="Inter, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif",
-                size=11,
-                color="#344054",
-            ),
-            showline=True,
-            linecolor="#D0D5DD",
-            zerolinecolor="#D0D5DD",
-        )
-        fig.update_yaxes(
-            autorange="reversed",
-            **category_axis,
-            tickfont=dict(
-                family="Inter, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif",
-                size=category_font_size,
-                color="#344054",
-            ),
-        )
+        fig.update_xaxes(**value_axis)
+        fig.update_yaxes(autorange="reversed", **category_axis)
     else:
         fig.update_yaxes(
             **value_axis,
             title_font=dict(size=12, color="#344054"),
-            tickfont=dict(
-                family="Inter, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif",
-                size=11,
-                color="#344054",
-            ),
+            tickfont=dict(size=11, color="#667085"),
         )
         fig.update_xaxes(
             tickangle=-35 if len(labels) > 10 else 0,
             **category_axis,
-            tickfont=dict(
-                family="Inter, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif",
-                size=11,
-                color="#344054",
-            ),
+            tickfont=dict(size=11, color="#667085"),
             showline=True,
-            linecolor="#D0D5DD",
+            linecolor="#d0d5dd",
         )
-
-    # Keep text readable even when Plotly changes its default template behavior.
-    fig.update_layout(
-        title_font=dict(
-            family="Inter, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif",
-            size=15,
-            color="#172033",
-        ),
-        uniformtext=dict(minsize=10, mode="hide"),
-    )
     return fig
 
 
