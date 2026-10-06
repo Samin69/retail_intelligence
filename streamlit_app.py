@@ -169,6 +169,76 @@ def inject_css():
         [data-testid="stChatInput"] textarea::placeholder, [data-testid="stChatInput"] input::placeholder {
             color:#6b7280 !important; -webkit-text-fill-color:#6b7280 !important; opacity:1 !important;
         }
+
+        /* =====================================================
+           FORCE A READABLE LIGHT UI
+           Streamlit follows the visitor's system theme. In dark mode it paints
+           text near-white, which is invisible on our white cards. Everything
+           below pins colours explicitly so the app reads correctly either way.
+           ===================================================== */
+        .stApp {color-scheme: light;}
+        .stApp [data-testid="stMain"], .stApp section.main {color:#1f2937;}
+
+        .stApp [data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarAssistant"])
+            :is(p, li, span, div, h1, h2, h3, h4, h5, h6, td, th, label, strong, em, b, i, summary, small) {
+            color:#1f2937 !important;
+        }
+        .stApp [data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarUser"])
+            :is(p, li, span, div, h1, h2, h3, h4, h5, h6, strong, em, a, code) {
+            color:#ffffff !important;
+        }
+        .stApp.stApp [data-testid="stChatMessage"] [data-testid="stCaptionContainer"],
+        .stApp.stApp [data-testid="stChatMessage"] [data-testid="stCaptionContainer"] * {color:#6b7280 !important;}
+        .stApp.stApp [data-testid="stChatMessage"] sup {color:#2563eb !important; font-weight:700;}
+        .stApp.stApp [data-testid="stChatMessage"] a {color:#2563eb !important;}
+        .stApp.stApp [data-testid="stChatMessage"] .section-label {color:#9ca3af !important;}
+        .stApp.stApp [data-testid="stChatMessage"] th {background:#f9fafb !important;}
+        .stApp.stApp [data-testid="stChatMessage"] table {background:#ffffff !important;}
+        .stApp.stApp [data-testid="stChatMessage"] code,
+        .stApp.stApp [data-testid="stChatMessage"] [data-testid="stCode"],
+        .stApp.stApp [data-testid="stChatMessage"] [data-testid="stCode"] pre,
+        .stApp.stApp [data-testid="stChatMessage"] [data-testid="stCode"] * {
+            background:#f3f4f6 !important; color:#111827 !important;
+        }
+
+        /* cards / expanders */
+        .stApp [data-testid="stChatMessage"] [data-testid="stVerticalBlockBorderWrapper"] {
+            background:#ffffff !important; border-color:#e5e7eb !important;
+        }
+        .stApp [data-testid="stExpander"], .stApp [data-testid="stExpander"] details,
+        .stApp [data-testid="stExpander"] summary {
+            background:#ffffff !important; border-color:#e5e7eb !important;
+        }
+        .stApp [data-testid="stExpander"] summary:hover {background:#f9fafb !important;}
+
+        /* pill buttons in the main area (downloads, suggestions, full CSV) */
+        .stApp [data-testid="stMain"] :is(.stButton, .stDownloadButton, [data-testid="stDownloadButton"]) button,
+        .stApp section.main :is(.stButton, .stDownloadButton) button {
+            background:#ffffff !important; color:#374151 !important;
+            border:1px solid #d1d5db !important; border-radius:999px !important;
+        }
+        .stApp [data-testid="stMain"] :is(.stButton, .stDownloadButton, [data-testid="stDownloadButton"]) button:hover {
+            background:#f1f5f9 !important; border-color:#9ca3af !important;
+        }
+        .stApp [data-testid="stMain"] :is(.stButton, .stDownloadButton, [data-testid="stDownloadButton"]) button * {
+            color:#374151 !important;
+        }
+
+        /* chat composer: the dark rounded bar came from an inner wrapper */
+        .stApp [data-testid="stChatInput"],
+        .stApp [data-testid="stChatInput"] div,
+        .stApp [data-testid="stChatInput"] textarea {
+            background:#ffffff !important; color:#111827 !important;
+            -webkit-text-fill-color:#111827 !important; caret-color:#111827 !important;
+        }
+        .stApp [data-testid="stChatInput"] {border:1px solid #d1d5db !important; border-radius:14px !important;}
+        .stApp [data-testid="stChatInput"] div {border-color:transparent !important;}
+        .stApp [data-testid="stChatInput"] textarea::placeholder {
+            color:#6b7280 !important; -webkit-text-fill-color:#6b7280 !important; opacity:1 !important;
+        }
+        .stApp [data-testid="stChatInput"] button {background:#111827 !important;}
+        .stApp [data-testid="stChatInput"] button svg {fill:#ffffff !important; color:#ffffff !important;}
+        .stApp [data-testid="stBottom"], .stApp [data-testid="stBottom"] > div {background:#f5f7fb !important;}
         </style>
         """,
         unsafe_allow_html=True,
@@ -483,7 +553,7 @@ def full_csv_control(table: Dict[str, Any], conversation_id: str, message_id: st
             st.download_button,
             "⬇ Full CSV",
             data=data,
-            file_name=f"{file_safe_name(table.get('title') or 'tns-result')}-full.csv",
+            file_name=f"{file_safe_name(table.get('title') or 'TNS-result')}-full.csv",
             mime="text/csv",
             key=f"fullcsv_dl_{key}",
         )
@@ -608,7 +678,7 @@ def render_answer(content: str, uid: str, source_titles: Optional[Dict[str, str]
         st.markdown("\n".join(block["raw"]), unsafe_allow_html=True)
         columns = [clean_cell(c) for c in block["head"]]
         rows = normalize_rows(columns, [[clean_cell(c) for c in row] for row in block["body"]])
-        base = f"tns-table-{index + 1}"
+        base = f"TNS-table-{index + 1}"
         slots = st.columns([1, 1, 5] if EXCEL_ENGINE else [1, 6])
         with slots[0]:
             csv_button(columns, rows, base, f"{uid}_md{index}")
@@ -1126,7 +1196,7 @@ def render_sidebar():
                     st.session_state.pending_prompt = ""
                     st.rerun()
             with c2:
-                if st.button("×", key=f"delete_{session['session_id']}", help="Delete conversation"):
+                if st.button("✕", key=f"delete_{session['session_id']}", help="Delete conversation"):
                     store.delete_session(session["session_id"], st.session_state.username)
                     if st.session_state.get("active_chat_id") == session["session_id"]:
                         st.session_state.active_chat_id = None
