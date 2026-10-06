@@ -50,34 +50,72 @@ def inject_css():
         .result-card {border:1px solid #e5e7eb;border-radius:12px;background:white;padding:14px;margin:12px 0;}
         .result-title {font-weight:650;color:#172033;margin-bottom:8px;}
         .source-note {font-size:11px;color:#9ca3af;margin-top:7px;}
-        .login-wrap {max-width:430px;margin:12vh auto 0;background:white;border:1px solid #e5e7eb;border-radius:16px;padding:34px;box-shadow:0 10px 30px rgba(17,24,39,.06);}
-        .login-logo {display:block;width:58px;height:58px;object-fit:contain;margin:0 auto 15px;border-radius:12px;background:white;}
-        .login-title{text-align:center;font-size:26px;font-weight:700;color:#172033;}
-        .login-sub{text-align:center;color:#6b7280;font-size:13px;margin:7px 0 24px;}
+        /* =====================================================
+           STREAMLIT LOGIN
+           ===================================================== */
+        [data-testid="stForm"] {
+            max-width: 430px !important;
+            margin: 12vh auto 0 !important;
+            padding: 32px !important;
+            background: #ffffff !important;
+            border: 1px solid #e5e7eb !important;
+            border-radius: 16px !important;
+            box-shadow: 0 15px 40px rgba(0,0,0,.07) !important;
+        }
+        [data-testid="stForm"] [data-testid="stTextInput"] label,
+        [data-testid="stForm"] [data-testid="stTextInput"] label p {
+            color: #374151 !important;
+            font-size: 13px !important;
+            font-weight: 600 !important;
+        }
+        [data-testid="stForm"] [data-testid="stTextInput"] input {
+            color: #111827 !important;
+            -webkit-text-fill-color: #111827 !important;
+            background: #ffffff !important;
+            border: 1px solid #d1d5db !important;
+            border-radius: 9px !important;
+        }
+        [data-testid="stForm"] [data-testid="stTextInput"] input::placeholder {
+            color: #9ca3af !important;
+            -webkit-text-fill-color: #9ca3af !important;
+            opacity: 1 !important;
+        }
+        [data-testid="stForm"] button {
+            color: #ffffff !important;
+            -webkit-text-fill-color: #ffffff !important;
+            background: #111827 !important;
+            border: 1px solid #111827 !important;
+            border-radius: 9px !important;
+            font-weight: 600 !important;
+        }
+        .login-logo {display:block;width:72px;height:72px;object-fit:contain;margin:0 auto 14px;border-radius:14px;background:#ffffff;border:1px solid #e5e7eb;box-shadow:0 2px 8px rgba(0,0,0,.06);}
+        .login-title{text-align:center;font-size:24px;font-weight:700;color:#172033;margin:0 0 7px;}
+        .login-sub{text-align:center;color:#6b7280;font-size:14px;margin:0 0 28px;}
+        .login-heading {text-align:center;}
         div[data-testid="stChatMessage"] {background:transparent;}
 
-        /* Keep typed text visible in Streamlit's native chat input. */
+        /* Keep Streamlit's native chat composer readable. */
+        [data-testid="stBottom"] { background:#f5f7fb !important; }
+        [data-testid="stChatInput"] {
+            background:#ffffff !important;
+            border:1px solid #d1d5db !important;
+            border-radius:14px !important;
+            box-shadow:0 4px 15px rgba(0,0,0,.05) !important;
+        }
         [data-testid="stChatInput"] textarea,
-        [data-testid="stChatInput"] input {
-            color: #172033 !important;
-            -webkit-text-fill-color: #172033 !important;
-            caret-color: #172033 !important;
-            background: #ffffff !important;
+        [data-testid="stChatInput"] input,
+        [data-testid="stChatInput"] textarea:focus,
+        [data-testid="stChatInput"] input:focus {
+            color:#111827 !important;
+            -webkit-text-fill-color:#111827 !important;
+            caret-color:#111827 !important;
+            background:#ffffff !important;
         }
         [data-testid="stChatInput"] textarea::placeholder,
         [data-testid="stChatInput"] input::placeholder {
-            color: #6b7280 !important;
-            -webkit-text-fill-color: #6b7280 !important;
-            opacity: 1 !important;
-        }
-        [data-testid="stTextInput"] input {
-            color: #172033 !important;
-            -webkit-text-fill-color: #172033 !important;
-            background: #ffffff !important;
-        }
-        [data-testid="stTextInput"] input::placeholder {
-            color: #6b7280 !important;
-            -webkit-text-fill-color: #6b7280 !important;
+            color:#6b7280 !important;
+            -webkit-text-fill-color:#6b7280 !important;
+            opacity:1 !important;
         }
         </style>
         """,
@@ -93,12 +131,17 @@ def new_client() -> GenieClient:
     return GenieClient()
 
 
-def call_genie(coro_factory):
+async def _call_genie(coro_factory):
     client = new_client()
     try:
-        return run_async(coro_factory(client))
+        return await coro_factory(client)
     finally:
-        run_async(client.close())
+        # Create, use, and close httpx.AsyncClient on the SAME event loop.
+        await client.close()
+
+
+def call_genie(coro_factory):
+    return run_async(_call_genie(coro_factory))
 
 
 def check_credentials(username: str, password: str) -> bool:
@@ -115,15 +158,15 @@ def ensure_store():
 
 def login_screen():
     inject_css()
-    st.markdown(
-        f'''<div class="login-wrap">
-            <img class="login-logo" src="{LOGO_URL}" />
-            <div class="login-title">TNS Retail Intelligence</div>
-            <div class="login-sub">Sign in to access company analytics</div>
-        </div>''',
-        unsafe_allow_html=True,
-    )
     with st.form("login_form"):
+        st.markdown(
+            f'''<div class="login-heading">
+                <img class="login-logo" src="{LOGO_URL}" />
+                <div class="login-title">TNS Retail Intelligence</div>
+                <div class="login-sub">Sign in to access company analytics</div>
+            </div>''',
+            unsafe_allow_html=True,
+        )
         username = st.text_input("Username", autocomplete="username")
         password = st.text_input("Password", type="password", autocomplete="current-password")
         submitted = st.form_submit_button("Sign in", use_container_width=True)
@@ -354,11 +397,7 @@ async def run_agent_turn(client: GenieClient, message: str, conversation_id: Opt
 
 
 def process_new_message(prompt: str):
-    client = new_client()
-    try:
-        result = run_async(run_agent_turn(client, prompt, None))
-    finally:
-        run_async(client.close())
+    result = call_genie(lambda client: run_agent_turn(client, prompt, None))
     title = prompt.strip()
     if len(title) > 60:
         title = title[:57] + "..."
@@ -373,11 +412,7 @@ def process_followup(session_id: str, prompt: str):
     conversation_id = store.get_conversation_id(session_id, st.session_state.username)
     if not conversation_id:
         raise GenieError("Chat session not found.")
-    client = new_client()
-    try:
-        result = run_async(run_agent_turn(client, prompt, conversation_id))
-    finally:
-        run_async(client.close())
+    result = call_genie(lambda client: run_agent_turn(client, prompt, conversation_id))
     if result["conversation_changed"]:
         store.set_conversation_id(session_id, st.session_state.username, result["conversation_id"])
     store.add_message(session_id, st.session_state.username, "user", prompt)
