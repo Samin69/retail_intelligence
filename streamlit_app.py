@@ -1013,6 +1013,34 @@ def render_assistant(content: str, presentation: Dict[str, Any], conversation_id
         if source:
             chart_sources.add(source.get("attachment_id"))
 
+    # Genie can return the query-result table without attaching a separate
+    # visualization object. This is common for prompts such as
+    # "give me the chart/plots". In that case we deliberately build the
+    # Chart.js visualization from the SAME query-result data instead of
+    # waiting for a Genie viz attachment. This is the Streamlit equivalent
+    # of the old Plotly path.
+    if not visualizations and tables and re.search(
+        r"\b(chart|charts|plot|plots|graph|graphs|visuali[sz]ation|trend)\b",
+        str(content or ""),
+        flags=re.IGNORECASE,
+    ):
+        synthetic_index = 0
+        for table in tables:
+            if table.get("attachment_id") in chart_sources:
+                continue
+            synthetic_viz = {
+                "title": table.get("title") or "Visualization",
+                "query_attachment_id": table.get("attachment_id"),
+            }
+            if build_chart_spec(table, synthetic_viz) is None:
+                continue
+            render_visualization(
+                synthetic_viz, tables, conversation_id, message_id,
+                f"{uid}_auto_v{synthetic_index}",
+            )
+            chart_sources.add(table.get("attachment_id"))
+            synthetic_index += 1
+
     for index, table in enumerate(tables):
         if table.get("attachment_id") in chart_sources:
             continue
