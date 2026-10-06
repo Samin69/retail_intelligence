@@ -1,23 +1,26 @@
 import asyncio
+import csv
 import html
+import importlib.util
 import io
 import logging
+import math
 import re
-from typing import Any, Dict, List, Optional, Tuple
+from datetime import datetime
+from typing import Any, Dict, List, Optional
 
-import altair as alt
 import httpx
 import pandas as pd
 import streamlit as st
 
+try:
+    import plotly.graph_objects as go
+except Exception:  # plotly not installed -> charts fall back to the Genie PNG
+    go = None
+
 from genie_client_streamlit import GenieClient, GenieError
 from streamlit_runtime import settings
 from streamlit_store import store
-
-
-# ============================================================================
-# Page configuration
-# ============================================================================
 
 st.set_page_config(
     page_title="TNS Retail Intelligence",
@@ -27,16 +30,24 @@ st.set_page_config(
 )
 
 LOGO_URL = "https://admin.thenewshop.in/static/media/New%20Logo%20.ad69756dd0621a9db47a.jpg"
+CURRENCY_SYMBOL = "₹"
+CHART_COLORS = ["#2563eb", "#f59e0b", "#10b981", "#ef4444", "#8b5cf6"]
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("tns_streamlit")
 
+EXCEL_ENGINE = (
+    "xlsxwriter" if importlib.util.find_spec("xlsxwriter")
+    else "openpyxl" if importlib.util.find_spec("openpyxl")
+    else None
+)
 
-# ============================================================================
+
+# =====================================================================
 # CSS
-# ============================================================================
+# =====================================================================
 
-def inject_css() -> None:
+def inject_css():
     st.markdown(
         """
         <style>
@@ -44,99 +55,238 @@ def inject_css() -> None:
         footer {visibility:hidden;}
         header {background:transparent !important;}
         .stApp {background:#f5f7fb; color:#172033;}
+
+        /* ---------- layout ---------- */
+        [data-testid="stMainBlockContainer"], .block-container {
+            max-width: 980px !important;
+            padding-top: 1.2rem !important;
+            padding-bottom: 7rem !important;
+        }
+
+        /* ---------- sidebar ---------- */
         [data-testid="stSidebar"] {background:#111827; min-width:270px; max-width:270px;}
         [data-testid="stSidebar"] * {color:#d1d5db;}
         [data-testid="stSidebar"] .stButton button {
-            text-align:left;
-            border:1px solid #374151;
-            background:#1f2937;
-            color:white;
-            border-radius:9px;
+            justify-content:flex-start; text-align:left;
+            border:1px solid #374151; background:#1f2937; color:white;
+            border-radius:9px; min-height:38px;
         }
-        [data-testid="stSidebar"] .stButton button:hover {
-            background:#374151;
-            border-color:#4b5563;
+        [data-testid="stSidebar"] .stButton button p {
+            overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:13px; color:#e5e7eb;
+        }
+        [data-testid="stSidebar"] .stButton button:hover {background:#374151; border-color:#4b5563;}
+        [data-testid="stSidebar"] .stButton button[kind="primary"],
+        [data-testid="stSidebar"] .stButton button[data-testid="stBaseButton-primary"] {
+            background:#374151; border-color:#6b7280;
         }
         .tns-brand {display:flex;align-items:center;gap:10px;padding:4px 0 18px;}
         .tns-brand img {width:38px;height:38px;border-radius:9px;object-fit:contain;background:white;}
-        .tns-brand-name {font-weight:650;font-size:16px;color:white;}
-        .tns-header {
-            background:white;
-            border-bottom:1px solid #e5e7eb;
-            padding:12px 24px;
-            margin:-1rem -1rem 1rem;
-        }
-        .tns-header-title {font-weight:600;font-size:15px;color:#172033;}
+        .tns-brand-name {font-weight:650;font-size:16px;color:white !important;}
+        .section-label {font-size:11px;font-weight:650;text-transform:uppercase;letter-spacing:.7px;color:#9ca3af;margin:14px 0 7px;}
+
+        /* ---------- header / welcome ---------- */
+        .tns-header {border-bottom:1px solid #e5e7eb; padding:2px 0 14px; margin-bottom:20px;}
+        .tns-header-title {font-weight:600;font-size:16px;color:#172033;}
         .tns-header-subtitle {font-size:11px;color:#9ca3af;margin-top:2px;}
-        .welcome {text-align:center;margin:12vh auto 8vh;}
+        .welcome {text-align:center;margin:14vh auto 8vh;}
         .welcome h1 {font-size:30px;letter-spacing:-.5px;color:#172033;margin-bottom:10px;}
         .welcome p {font-size:14px;color:#6b7280;}
-        .user-bubble {
-            background:#111827;
-            color:white;
-            border-radius:14px 14px 4px 14px;
-            padding:13px 16px;
-            line-height:1.55;
-            margin:12px 0 18px 18%;
+
+        /* ---------- chat bubbles ---------- */
+        [data-testid="stChatMessage"] {background:transparent; padding:0; gap:0; margin-bottom:16px;}
+        [data-testid^="stChatMessageAvatar"] {display:none !important;}
+        [data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarUser"]) {
+            background:#111827; border-radius:14px 14px 4px 14px;
+            padding:12px 16px; margin-left:20%;
         }
-        .assistant-bubble {
-            background:white;
-            border:1px solid #e5e7eb;
-            border-radius:14px 14px 14px 4px;
-            padding:13px 16px;
-            line-height:1.6;
-            margin:12px 18% 18px 0;
+        [data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarUser"]) * {color:#ffffff !important;}
+        [data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarAssistant"]) {
+            background:#ffffff; border:1px solid #e5e7eb;
+            border-radius:14px 14px 14px 4px; padding:14px 18px; color:#1f2937;
         }
-        .section-label {
-            font-size:11px;
-            font-weight:650;
-            text-transform:uppercase;
-            letter-spacing:.7px;
-            color:#9ca3af;
-            margin:14px 0 7px;
+        [data-testid="stChatMessage"] h1 {font-size:20px; margin:14px 0 6px;}
+        [data-testid="stChatMessage"] h2 {font-size:17px; margin:14px 0 6px;}
+        [data-testid="stChatMessage"] h3 {font-size:15px; margin:14px 0 6px;}
+        [data-testid="stChatMessage"] h4 {font-size:14px; margin:12px 0 6px;}
+        [data-testid="stChatMessage"] p, [data-testid="stChatMessage"] li {font-size:14px; line-height:1.6;}
+        [data-testid="stChatMessage"] table {border-collapse:collapse; font-size:13px; margin:8px 0 10px;}
+        [data-testid="stChatMessage"] th, [data-testid="stChatMessage"] td {
+            border:1px solid #e5e7eb !important; padding:6px 10px !important; text-align:left;
         }
-        .result-card {
-            border:1px solid #e5e7eb;
-            border-radius:12px;
-            background:white;
-            padding:14px;
-            margin:12px 0;
+        [data-testid="stChatMessage"] th {background:#f9fafb !important; font-weight:700;}
+        [data-testid="stChatMessage"] sup {font-size:10px; color:#2563eb; font-weight:700; padding:0 1px;}
+
+        /* ---------- cards, buttons ---------- */
+        [data-testid="stChatMessage"] [data-testid="stVerticalBlockBorderWrapper"] {
+            border-radius:12px; background:#ffffff;
         }
-        .result-title {font-weight:650;color:#172033;margin-bottom:8px;}
-        .source-note {font-size:11px;color:#9ca3af;margin-top:7px;}
-        .chart-title {font-size:17px;font-weight:650;color:#172033;margin-bottom:2px;}
-        .chart-description {font-size:12px;color:#6b7280;margin-bottom:8px;}
-        .chart-source {font-size:11px;color:#9ca3af;margin-top:4px;}
-        .login-wrap {
-            max-width:430px;
-            margin:12vh auto 0;
-            background:white;
-            border:1px solid #e5e7eb;
-            border-radius:16px;
-            padding:34px;
-            box-shadow:0 10px 30px rgba(17,24,39,.06);
+        [data-testid="stMain"] .stButton button,
+        [data-testid="stMain"] .stDownloadButton button,
+        section.main .stButton button,
+        section.main .stDownloadButton button {
+            border:1px solid #d1d5db; background:#ffffff; color:#374151;
+            border-radius:999px; font-size:12px; padding:3px 12px; min-height:32px;
         }
-        .login-logo {
-            display:block;
-            width:58px;
-            height:58px;
-            object-fit:contain;
-            margin:0 auto 15px;
-            border-radius:12px;
-            background:white;
+        [data-testid="stMain"] .stButton button:hover,
+        [data-testid="stMain"] .stDownloadButton button:hover {background:#f1f5f9; border-color:#cbd5e1; color:#111827;}
+        [data-testid="stMain"] .stButton button p, [data-testid="stMain"] .stDownloadButton button p {font-size:12px;}
+
+        /* ---------- login ---------- */
+        [data-testid="stForm"] {
+            max-width:430px !important; margin:12vh auto 0 !important; padding:32px !important;
+            background:#ffffff !important; border:1px solid #e5e7eb !important;
+            border-radius:16px !important; box-shadow:0 15px 40px rgba(0,0,0,.07) !important;
         }
-        .login-title{text-align:center;font-size:26px;font-weight:700;color:#172033;}
-        .login-sub{text-align:center;color:#6b7280;font-size:13px;margin:7px 0 24px;}
-        div[data-testid="stChatMessage"] {background:transparent;}
+        [data-testid="stForm"] [data-testid="stTextInput"] label,
+        [data-testid="stForm"] [data-testid="stTextInput"] label p {
+            color:#374151 !important; font-size:13px !important; font-weight:600 !important;
+        }
+        [data-testid="stForm"] [data-testid="stTextInput"] input {
+            color:#111827 !important; -webkit-text-fill-color:#111827 !important;
+            background:#ffffff !important; border:1px solid #d1d5db !important; border-radius:9px !important;
+        }
+        [data-testid="stForm"] button {
+            color:#ffffff !important; -webkit-text-fill-color:#ffffff !important;
+            background:#111827 !important; border:1px solid #111827 !important;
+            border-radius:9px !important; font-weight:600 !important;
+        }
+        .login-logo {display:block;width:72px;height:72px;object-fit:contain;margin:0 auto 14px;border-radius:14px;background:#ffffff;border:1px solid #e5e7eb;box-shadow:0 2px 8px rgba(0,0,0,.06);}
+        .login-title{text-align:center;font-size:24px;font-weight:700;color:#172033;margin:0 0 7px;}
+        .login-sub{text-align:center;color:#6b7280;font-size:14px;margin:0 0 28px;}
+        .login-heading {text-align:center;}
+
+        /* ---------- chat composer ---------- */
+        /* Keep the Streamlit composer aligned with the same content column as
+           the chat cards instead of stretching it across the viewport. */
+        [data-testid="stBottom"] {
+            background:#f5f7fb !important;
+            border-top:0 !important;
+        }
+        [data-testid="stBottom"] > div {
+            max-width:1024px !important;
+            width:calc(100% - 32px) !important;
+            margin:0 auto !important;
+            padding:0 0 12px 0 !important;
+        }
+        [data-testid="stBottom"] [data-testid="stChatInput"] {
+            width:100% !important;
+            margin:0 !important;
+        }
+        [data-testid="stChatInput"] {
+            background:#ffffff !important; border:1px solid #d1d5db !important;
+            border-radius:14px !important; box-shadow:0 4px 15px rgba(0,0,0,.05) !important;
+        }
+        [data-testid="stChatInput"] textarea, [data-testid="stChatInput"] input,
+        [data-testid="stChatInput"] textarea:focus, [data-testid="stChatInput"] input:focus {
+            color:#111827 !important; -webkit-text-fill-color:#111827 !important;
+            caret-color:#111827 !important; background:#ffffff !important;
+        }
+        [data-testid="stChatInput"] textarea::placeholder, [data-testid="stChatInput"] input::placeholder {
+            color:#6b7280 !important; -webkit-text-fill-color:#6b7280 !important; opacity:1 !important;
+        }
+
+        /* =====================================================
+           FORCE A READABLE LIGHT UI
+           Streamlit follows the visitor's system theme. In dark mode it paints
+           text near-white, which is invisible on our white cards. Everything
+           below pins colours explicitly so the app reads correctly either way.
+           ===================================================== */
+        .stApp {color-scheme: light;}
+        .stApp [data-testid="stMain"], .stApp section.main {color:#1f2937;}
+
+        .stApp [data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarAssistant"])
+            :is(p, li, span, div, h1, h2, h3, h4, h5, h6, td, th, label, strong, em, b, i, summary, small) {
+            color:#1f2937 !important;
+        }
+        .stApp [data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarUser"])
+            :is(p, li, span, div, h1, h2, h3, h4, h5, h6, strong, em, a, code) {
+            color:#ffffff !important;
+        }
+        .stApp.stApp [data-testid="stChatMessage"] [data-testid="stCaptionContainer"],
+        .stApp.stApp [data-testid="stChatMessage"] [data-testid="stCaptionContainer"] * {color:#6b7280 !important;}
+        .stApp.stApp [data-testid="stChatMessage"] sup {color:#2563eb !important; font-weight:700;}
+        .stApp.stApp [data-testid="stChatMessage"] a {color:#2563eb !important;}
+        .stApp.stApp [data-testid="stChatMessage"] .section-label {color:#9ca3af !important;}
+        .stApp.stApp [data-testid="stChatMessage"] th {background:#f9fafb !important;}
+        .stApp.stApp [data-testid="stChatMessage"] table {background:#ffffff !important;}
+        .stApp.stApp [data-testid="stChatMessage"] code,
+        .stApp.stApp [data-testid="stChatMessage"] [data-testid="stCode"],
+        .stApp.stApp [data-testid="stChatMessage"] [data-testid="stCode"] pre,
+        .stApp.stApp [data-testid="stChatMessage"] [data-testid="stCode"] * {
+            background:#f3f4f6 !important; color:#111827 !important;
+        }
+
+        /* cards / expanders */
+        .stApp [data-testid="stChatMessage"] [data-testid="stVerticalBlockBorderWrapper"] {
+            background:#ffffff !important; border-color:#e5e7eb !important;
+        }
+        .stApp [data-testid="stExpander"], .stApp [data-testid="stExpander"] details,
+        .stApp [data-testid="stExpander"] summary {
+            background:#ffffff !important; border-color:#e5e7eb !important;
+        }
+        .stApp [data-testid="stExpander"] summary:hover {background:#f9fafb !important;}
+
+        /* pill buttons in the main area (downloads, suggestions, full CSV) */
+        .stApp [data-testid="stMain"] :is(.stButton, .stDownloadButton, [data-testid="stDownloadButton"]) button,
+        .stApp section.main :is(.stButton, .stDownloadButton) button {
+            background:#ffffff !important; color:#374151 !important;
+            border:1px solid #d1d5db !important; border-radius:999px !important;
+        }
+        .stApp [data-testid="stMain"] :is(.stButton, .stDownloadButton, [data-testid="stDownloadButton"]) button:hover {
+            background:#f1f5f9 !important; border-color:#9ca3af !important;
+        }
+        .stApp [data-testid="stMain"] :is(.stButton, .stDownloadButton, [data-testid="stDownloadButton"]) button * {
+            color:#374151 !important;
+        }
+
+        /* chat composer: the dark rounded bar came from an inner wrapper */
+        .stApp [data-testid="stChatInput"],
+        .stApp [data-testid="stChatInput"] div,
+        .stApp [data-testid="stChatInput"] textarea {
+            background:#ffffff !important; color:#111827 !important;
+            -webkit-text-fill-color:#111827 !important; caret-color:#111827 !important;
+        }
+        .stApp [data-testid="stChatInput"] {border:1px solid #d1d5db !important; border-radius:14px !important;}
+        .stApp [data-testid="stChatInput"] div {border-color:transparent !important;}
+        .stApp [data-testid="stChatInput"] textarea::placeholder {
+            color:#6b7280 !important; -webkit-text-fill-color:#6b7280 !important; opacity:1 !important;
+        }
+        .stApp [data-testid="stChatInput"] button {background:#111827 !important;}
+        .stApp [data-testid="stChatInput"] button svg {fill:#ffffff !important; color:#ffffff !important;}
+        .stApp [data-testid="stBottom"], .stApp [data-testid="stBottom"] > div {background:#f5f7fb !important;}
         </style>
         """,
         unsafe_allow_html=True,
     )
 
 
-# ============================================================================
-# Async / Genie helpers
-# ============================================================================
+# =====================================================================
+# Streamlit version helpers
+# =====================================================================
+
+_WIDE_MODE: Dict[str, str] = {}
+
+
+def wide(fn, *args, **kwargs):
+    """Call a Streamlit element stretched to full width, on old and new versions."""
+    name = getattr(fn, "__name__", str(fn))
+    mode = _WIDE_MODE.get(name)
+    if mode is None:
+        try:
+            result = fn(*args, width="stretch", **kwargs)
+            _WIDE_MODE[name] = "stretch"
+            return result
+        except Exception:
+            _WIDE_MODE[name] = "legacy"
+            return fn(*args, use_container_width=True, **kwargs)
+    if mode == "stretch":
+        return fn(*args, width="stretch", **kwargs)
+    return fn(*args, use_container_width=True, **kwargs)
+
+
+# =====================================================================
+# Genie call plumbing (unchanged behaviour)
+# =====================================================================
 
 def run_async(coro):
     return asyncio.run(coro)
@@ -146,266 +296,127 @@ def new_client() -> GenieClient:
     return GenieClient()
 
 
-def call_genie(coro_factory):
+async def _call_genie(coro_factory):
     client = new_client()
     try:
-        return run_async(coro_factory(client))
+        return await coro_factory(client)
     finally:
-        # Keep the same lifecycle used by the working Streamlit app.
-        try:
-            run_async(client.close())
-        except RuntimeError as exc:
-            # Do not turn an already completed Genie response into a UI error
-            # merely because httpx is trying to close an event-loop-bound
-            # transport after asyncio.run() has finished.
-            logger.warning("Genie client close skipped: %s", exc)
+        await client.close()
 
 
-# ============================================================================
-# Authentication / storage
-# ============================================================================
+def call_genie(coro_factory):
+    return run_async(_call_genie(coro_factory))
+
 
 def check_credentials(username: str, password: str) -> bool:
     return username == settings.app_username and password == settings.app_password
 
 
-def ensure_store() -> None:
+def ensure_store():
     if st.session_state.get("store_initialized"):
         return
     store.initialize()
     st.session_state.store_initialized = True
 
 
-def login_screen() -> None:
-    inject_css()
-    st.markdown(
-        f'''<div class="login-wrap">
-            <img class="login-logo" src="{LOGO_URL}" />
-            <div class="login-title">TNS Retail Intelligence</div>
-            <div class="login-sub">Sign in to access company analytics</div>
-        </div>''',
-        unsafe_allow_html=True,
-    )
+# =====================================================================
+# Number / cell formatting (Indian style, same rules as the web UI)
+# =====================================================================
 
-    with st.form("login_form"):
-        username = st.text_input("Username", autocomplete="username")
-        password = st.text_input(
-            "Password",
-            type="password",
-            autocomplete="current-password",
-        )
-        submitted = st.form_submit_button("Sign in", use_container_width=True)
-
-    if submitted:
-        if check_credentials(username.strip(), password):
-            st.session_state.authenticated = True
-            st.session_state.username = username.strip()
-            st.session_state.active_chat_id = None
-            st.rerun()
-        else:
-            st.error("Invalid username or password.")
+_NUMERIC_RE = re.compile(r"^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$")
 
 
-def get_sessions():
-    return store.list_sessions(st.session_state.username)
-
-
-def load_history(session_id: str):
-    history = store.get_history(session_id, st.session_state.username)
-    if history is None:
-        st.error("Chat session not found.")
-        return None
-    return history
-
-
-# ============================================================================
-# Query-result rendering
-# ============================================================================
-
-def download_signed_links(
-    table: Dict[str, Any],
-    conversation_id: str,
-    message_id: str,
-) -> None:
-    attachment_id = table.get("attachment_id")
-    if not attachment_id or not message_id:
-        return
-
-    try:
-        links = call_genie(
-            lambda client: client.get_full_query_download_links(
-                conversation_id,
-                message_id,
-                attachment_id,
-            )
-        )
-        for index, link in enumerate(links):
-            try:
-                response = httpx.get(link, timeout=120.0)
-                response.raise_for_status()
-                label = (
-                    "Download query result"
-                    if len(links) == 1
-                    else f"Download query result {index + 1}"
-                )
-                st.download_button(
-                    label,
-                    data=response.content,
-                    file_name=f"genie_query_result_{index + 1}.csv",
-                    mime="text/csv",
-                    key=f"download_{conversation_id}_{message_id}_{attachment_id}_{index}",
-                )
-            except Exception as exc:
-                logger.warning("Could not download query result: %s", exc)
-                st.link_button(f"Open download {index + 1}", link)
-    except Exception as exc:
-        logger.warning("Could not create query-result download: %s", exc)
-
-
-def render_table(
-    table: Dict[str, Any],
-    conversation_id: str,
-    message_id: str,
-) -> None:
-    with st.container(border=True):
-        st.markdown(f"**{table.get('title') or 'Query result'}**")
-        if table.get("description"):
-            st.caption(table["description"])
-
-        columns = table.get("columns") or []
-        rows = table.get("rows") or []
-
-        if columns:
-            df = pd.DataFrame(rows, columns=columns)
-            st.dataframe(df, use_container_width=True, hide_index=True)
-        else:
-            st.info(table.get("error") or "No tabular result was returned.")
-
-        displayed = table.get("displayed_row_count", len(rows))
-        total = table.get("row_count", displayed)
-        if table.get("truncated") or total > displayed:
-            st.caption(f"Showing {displayed:,} of {total:,} rows.")
-
-        download_signed_links(table, conversation_id, message_id)
-
-
-# ============================================================================
-# Semantic chart engine
-#
-# IMPORTANT:
-#   This does NOT download the Databricks visualization PNG.
-#   It uses the exact query attachment referenced by
-#   viz.query_attachment_id and renders that real Genie result with
-#   a deterministic Vega-Lite/Altair specification.
-# ============================================================================
-
-_CURRENCY_WORDS = (
-    "revenue", "sales", "mrp", "amount", "price", "cost", "profit",
-    "salesvalue", "salesamount", "gmv", "turnover", "discount",
-    "deliveryfee", "taxamount", "netamount", "grossamount", "spend",
-    "expense", "expenditure", "value",
-)
-
-_QUANTITY_WORDS = (
-    "quantity", "qty", "unit", "units", "unitcount", "itemcount",
-    "productcount", "skucount", "ordercount", "storecount",
-    "customercount", "count", "volume", "demand", "orders", "transactions",
-    "invoices", "bills",
-)
-
-_PERCENT_WORDS = (
-    "percent", "percentage", "pct", "rate", "margin", "share", "growth",
-    "contribution",
-)
-
-_SERIES_GROUPS = {
-    "quantity": (
-        "quantity", "qty", "units", "unit", "demand", "volume",
-    ),
-    "revenue": (
-        "revenue", "sales", "amount", "value", "gmv", "turnover",
-    ),
-    "orders": (
-        "orders", "order", "transactions", "transaction", "invoices",
-        "invoice", "bills", "bill", "count",
-    ),
-    "cost": ("cost", "cogs", "purchase", "expense", "expenditure"),
-    "profit": ("profit", "grossprofit", "netprofit"),
-    "margin": ("margin", "rate", "percentage", "percent", "pct"),
-    "forecast": ("forecast", "predicted", "prediction", "projected", "estimate"),
-}
-
-
-def normalize_column_name(value: Any) -> str:
-    return re.sub(r"[^a-z0-9]", "", str(value or "").lower())
+def normalize_name(name: Any) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(name or "").lower())
 
 
 def is_numeric_value(value: Any) -> bool:
     if value is None or value == "":
         return False
-    try:
-        if isinstance(value, bool):
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        try:
+            return math.isfinite(float(value))
+        except (TypeError, ValueError):
             return False
-        number = float(str(value).strip())
-        return pd.notna(number)
+    text = str(value).strip()
+    if _NUMERIC_RE.match(text):
+        try:
+            return math.isfinite(float(text))
+        except ValueError:
+            return False
+    # Accept display-formatted numeric values as a charting fallback.
+    # Examples: 4K, 2.5M, ₹1,23,456, 4,000, 12.5%.
+    cleaned = text.replace(",", "").replace("₹", "").replace("%", "").strip()
+    multiplier = 1.0
+    if cleaned and cleaned[-1:].upper() in {"K", "M", "B", "L", "C"}:
+        suffix = cleaned[-1].upper()
+        cleaned = cleaned[:-1].strip()
+        multiplier = {"K": 1_000.0, "M": 1_000_000.0, "B": 1_000_000_000.0,
+                      "L": 100_000.0, "C": 10_000_000.0}[suffix]
+    try:
+        return math.isfinite(float(cleaned) * multiplier)
     except (TypeError, ValueError):
         return False
 
 
-def is_iso_date(value: Any) -> bool:
-    return bool(re.match(r"^\d{4}-\d{2}-\d{2}([T ]|$)", str(value)))
+def numeric_value(value: Any) -> Optional[float]:
+    if value is None or value == "":
+        return None
+    try:
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            number = float(value)
+            return number if math.isfinite(number) else None
+        text = str(value).strip().replace(",", "").replace("₹", "").replace("%", "").strip()
+        multiplier = 1.0
+        if text and text[-1:].upper() in {"K", "M", "B", "L", "C"}:
+            suffix = text[-1].upper()
+            text = text[:-1].strip()
+            multiplier = {"K": 1_000.0, "M": 1_000_000.0, "B": 1_000_000_000.0,
+                          "L": 100_000.0, "C": 10_000_000.0}[suffix]
+        number = float(text) * multiplier
+        return number if math.isfinite(number) else None
+    except (TypeError, ValueError):
+        return None
 
 
-def is_currency_column(column_name: Any) -> bool:
-    name = normalize_column_name(column_name)
-    if is_quantity_column(column_name) or is_percentage_column(column_name):
+def is_quantity_column(name: Any) -> bool:
+    n = normalize_name(name)
+    words = ("quantity", "qty", "units", "unitcount", "itemcount", "productcount",
+             "skucount", "ordercount", "storecount", "customercount")
+    return any(w in n for w in words) or n.endswith("count")
+
+
+def is_percentage_column(name: Any) -> bool:
+    n = normalize_name(name)
+    return any(w in n for w in ("percent", "percentage", "rate", "margin")) or n.endswith("pct")
+
+
+def is_currency_column(name: Any) -> bool:
+    if is_quantity_column(name) or is_percentage_column(name):
         return False
-    return any(word in name for word in _CURRENCY_WORDS)
+    n = normalize_name(name)
+    words = ("revenue", "sales", "mrp", "amount", "price", "cost", "profit", "gmv",
+             "turnover", "discount", "deliveryfee", "taxamount", "netamount", "grossamount")
+    return any(w in n for w in words)
 
 
-def is_quantity_column(column_name: Any) -> bool:
-    name = normalize_column_name(column_name)
-    return (
-        name == "quantity"
-        or "quantity" in name
-        or name == "qty"
-        or "qty" in name
-        or "units" in name
-        or "unitcount" in name
-        or "itemcount" in name
-        or "productcount" in name
-        or "skucount" in name
-        or "ordercount" in name
-        or "storecount" in name
-        or "customercount" in name
-        or name.endswith("count")
-        or "demand" in name
-        or "volume" in name
-    )
-
-
-def is_percentage_column(column_name: Any) -> bool:
-    name = normalize_column_name(column_name)
-    return (
-        "percent" in name
-        or "percentage" in name
-        or name.endswith("pct")
-        or "rate" in name
-        or "margin" in name
-        or "share" in name
-        or "growth" in name
-        or "contribution" in name
-    )
-
-
-def column_kind(column_name: Any) -> str:
-    if is_percentage_column(column_name):
-        return "percent"
-    if is_currency_column(column_name):
-        return "currency"
-    if is_quantity_column(column_name):
-        return "quantity"
-    return "number"
+def indian_format(value: float, min_dec: int = 0, max_dec: int = 2) -> str:
+    """Format a non-negative number with Indian digit grouping (12,34,567.89)."""
+    text = f"{abs(value):.{max_dec}f}"
+    int_part, _, dec = text.partition(".")
+    dec = dec.rstrip("0")
+    if len(dec) < min_dec:
+        dec = dec.ljust(min_dec, "0")
+    if len(int_part) > 3:
+        head, tail = int_part[:-3], int_part[-3:]
+        groups: List[str] = []
+        while len(head) > 2:
+            groups.insert(0, head[-2:])
+            head = head[:-2]
+        if head:
+            groups.insert(0, head)
+        int_part = ",".join(groups + [tail])
+    return int_part + (f".{dec}" if dec else "")
 
 
 def format_indian_currency(value: Any) -> str:
@@ -413,17 +424,45 @@ def format_indian_currency(value: Any) -> str:
         number = float(value)
     except (TypeError, ValueError):
         return str(value)
-
-    if not pd.notna(number):
+    if not math.isfinite(number):
         return str(value)
-
-    absolute = abs(number)
     sign = "-" if number < 0 else ""
+    absolute = abs(number)
     if absolute >= 10_000_000:
-        return f"{sign}₹{absolute / 10_000_000:,.2f} Cr"
+        return f"{sign}{CURRENCY_SYMBOL}{indian_format(absolute / 10_000_000, 2, 2)} Cr"
     if absolute >= 100_000:
-        return f"{sign}₹{absolute / 100_000:,.2f} L"
-    return f"{sign}₹{absolute:,.2f}"
+        return f"{sign}{CURRENCY_SYMBOL}{indian_format(absolute / 100_000, 2, 2)} L"
+    return f"{sign}{CURRENCY_SYMBOL}{indian_format(absolute, 0, 2)}"
+
+
+def format_plain_number(value: Any) -> str:
+    number = float(value)
+    return ("-" if number < 0 else "") + indian_format(number, 0, 2)
+
+
+def format_cell(value: Any, column: str = "") -> str:
+    if value is None or value == "":
+        return "—"
+    text = str(value).strip()
+    if not is_numeric_value(text):
+        return str(value)
+    if is_quantity_column(column):
+        return format_plain_number(text)
+    if is_percentage_column(column):
+        return f"{format_plain_number(text)}%"
+    if is_currency_column(column):
+        return format_indian_currency(text)
+    return format_plain_number(text)
+
+
+def column_kind(name: Any) -> str:
+    if is_currency_column(name):
+        return "currency"
+    if is_quantity_column(name):
+        return "quantity"
+    if is_percentage_column(name):
+        return "percent"
+    return "number"
 
 
 def format_chart_value(value: Any, kind: str) -> str:
@@ -431,448 +470,595 @@ def format_chart_value(value: Any, kind: str) -> str:
         return "—"
     if kind == "currency":
         return format_indian_currency(value)
+    formatted = format_plain_number(value)
+    return f"{formatted}%" if kind == "percent" else formatted
+
+
+def format_compact_chart_value(value: Any, kind: str) -> str:
+    """Compact chart labels/ticks so scales stay readable at a glance."""
+    if value is None:
+        return "—"
     try:
         number = float(value)
-        text = f"{number:,.2f}".rstrip("0").rstrip(".")
     except (TypeError, ValueError):
         return str(value)
-    return f"{text}%" if kind == "percent" else text
+
+    sign = "-" if number < 0 else ""
+    number = abs(number)
+    if kind == "percent":
+        return f"{sign}{number:,.0f}%"
+
+    if number >= 1_000_000:
+        text = f"{number / 1_000_000:.1f}M"
+    elif number >= 1_000:
+        text = f"{number / 1_000:.1f}K"
+    elif number >= 100:
+        text = f"{number:,.0f}"
+    elif number >= 10:
+        text = f"{number:,.1f}".rstrip("0").rstrip(".")
+    else:
+        text = f"{number:,.2f}".rstrip("0").rstrip(".")
+
+    prefix = "₹" if kind == "currency" else ""
+    return f"{sign}{prefix}{text}"
 
 
-def format_axis_label(value: Any, monthly: bool = False) -> str:
+def unique_columns(columns: List[str]) -> List[str]:
+    seen: Dict[str, int] = {}
+    result = []
+    for column in columns:
+        count = seen.get(column, 0)
+        seen[column] = count + 1
+        result.append(column if count == 0 else f"{column} ({count + 1})")
+    return result
+
+
+def normalize_rows(columns: List[str], rows: List[Any]) -> List[List[Any]]:
+    width = len(columns)
+    out = []
+    for row in rows:
+        row = list(row) if isinstance(row, (list, tuple)) else [row]
+        out.append((row + [None] * width)[:width])
+    return out
+
+
+# =====================================================================
+# Downloads (CSV / Excel / full CSV)
+# =====================================================================
+
+def file_safe_name(value: Any) -> str:
+    name = re.sub(r"[\\/:*?\"<>|]+", " ", str(value or "table"))
+    name = re.sub(r"\s+", "-", name).strip("-")[:80]
+    return name or "table"
+
+
+def csv_bytes(columns: List[str], rows: List[List[Any]]) -> bytes:
+    buffer = io.StringIO()
+    writer = csv.writer(buffer, lineterminator="\r\n")
+    writer.writerow(columns)
+    for row in rows:
+        writer.writerow(["" if v is None else v for v in row])
+    # BOM so Excel opens UTF-8 (₹ etc.) correctly.
+    return ("\ufeff" + buffer.getvalue()).encode("utf-8")
+
+
+def coerce_excel_cell(value: Any, allow_formatted: bool = False) -> Any:
+    if value is None or value == "":
+        return ""
+    candidate = str(value).strip()
+    if allow_formatted:
+        candidate = re.sub(r"^₹\s?", "", candidate).replace(",", "")
+    if (
+        is_numeric_value(candidate)
+        and not re.match(r"^[+-]?0\d", candidate)
+        and len(re.sub(r"\D", "", candidate)) <= 15
+    ):
+        return float(candidate)
+    return value
+
+
+@st.cache_data(show_spinner=False, max_entries=64)
+def excel_bytes(columns: tuple, rows: tuple, sheet_name: str, allow_formatted: bool) -> Optional[bytes]:
+    if EXCEL_ENGINE is None:
+        return None
+    cols = unique_columns(list(columns))
+    data = [[coerce_excel_cell(c, allow_formatted) for c in row] for row in rows]
+    frame = pd.DataFrame(data, columns=cols)
+    buffer = io.BytesIO()
+    safe_sheet = re.sub(r"[\\/?*\[\]:]", "", sheet_name)[:31] or "Sheet1"
+    with pd.ExcelWriter(buffer, engine=EXCEL_ENGINE) as writer:
+        frame.to_excel(writer, index=False, sheet_name=safe_sheet)
+    return buffer.getvalue()
+
+
+def csv_button(columns, rows, base_name, key):
+    wide(
+        st.download_button,
+        "⬇ CSV",
+        data=csv_bytes(columns, rows),
+        file_name=f"{base_name}.csv",
+        mime="text/csv",
+        key=f"csv_{key}",
+    )
+
+
+def excel_button(columns, rows, base_name, key, allow_formatted=False):
+    if EXCEL_ENGINE is None:
+        return
+    data = excel_bytes(tuple(columns), tuple(tuple(r) for r in rows), base_name, allow_formatted)
+    if not data:
+        return
+    wide(
+        st.download_button,
+        "⬇ Excel",
+        data=data,
+        file_name=f"{base_name}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key=f"xlsx_{key}",
+    )
+
+
+def fetch_full_csv(conversation_id: str, message_id: str, attachment_id: str) -> bytes:
+    links = call_genie(
+        lambda client: client.get_full_query_download_links(conversation_id, message_id, attachment_id)
+    )
+    parts: List[bytes] = []
+    for link in links:
+        response = httpx.get(link, timeout=300.0, follow_redirects=True)
+        response.raise_for_status()
+        parts.append(response.content)
+    if not parts:
+        raise GenieError("Databricks returned no download files.")
+
+    merged = parts[0].lstrip(b"\xef\xbb\xbf")
+    header = merged.split(b"\n", 1)[0].strip()
+    for extra in parts[1:]:
+        extra = extra.lstrip(b"\xef\xbb\xbf")
+        first = extra.split(b"\n", 1)[0].strip()
+        if first == header and b"\n" in extra:
+            extra = extra.split(b"\n", 1)[1]
+        if not merged.endswith(b"\n"):
+            merged += b"\n"
+        merged += extra
+    return b"\xef\xbb\xbf" + merged
+
+
+def full_csv_control(table: Dict[str, Any], conversation_id: str, message_id: str, key: str):
+    attachment_id = table.get("attachment_id")
+    if not attachment_id or not message_id or not conversation_id:
+        return
+    state_key = f"fullcsv_{key}"
+    data = st.session_state.get(state_key)
+    if data is not None:
+        wide(
+            st.download_button,
+            "⬇ Full CSV",
+            data=data,
+            file_name=f"{file_safe_name(table.get('title') or 'TNS-result')}-full.csv",
+            mime="text/csv",
+            key=f"fullcsv_dl_{key}",
+        )
+        return
+    if wide(st.button, "Full CSV (all rows)", key=f"fullcsv_btn_{key}"):
+        try:
+            with st.spinner("Preparing full CSV…"):
+                st.session_state[state_key] = fetch_full_csv(conversation_id, message_id, attachment_id)
+            st.rerun()
+        except GenieError as exc:
+            st.warning(f"Unable to prepare the full CSV: {exc}")
+        except httpx.HTTPError as exc:
+            st.warning(f"Unable to download the full CSV: {exc}")
+
+
+# =====================================================================
+# Markdown preparation (citations, ₹, glued headings, tables)
+# =====================================================================
+
+_CITATION_RE = re.compile(
+    r"\[unrendered\s+:citation\[([^\]]+)\]\]|:citation\[([^\]]+)\](?:\{[^}]*\})?"
+)
+_OTHER_DIRECTIVE_RE = re.compile(r"\[unrendered\s+:[A-Za-z]+\[[^\]]*\]\]")
+_GLUED_HEADING_MARKER_RE = re.compile(r"([A-Za-z0-9)\.:\]])(#{2,6})[ \t]+(?=[A-Z])")
+_GLUED_HEADING_LINE_RE = re.compile(r"^(?:#{1,6}\s+)?((?:[A-Z][a-z]+ ){0,3}[A-Z][a-z]+)(?=[A-Z][a-z]+ [a-z])")
+_TABLE_SEPARATOR_RE = re.compile(r"^\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?$")
+
+
+def normalize_source_id(value: Any) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(value or "").lower())
+
+
+def prepare_text(text: str, source_titles: Optional[Dict[str, str]] = None):
+    """Return (markdown, cited_ids) ready for st.markdown(unsafe_allow_html=True)."""
+    source_titles = source_titles or {}
+    cited: List[str] = []
+
+    def citation(match: "re.Match[str]") -> str:
+        raw_id = match.group(1) or match.group(2) or ""
+        cid = re.sub(r"[^A-Za-z0-9_-]", "", raw_id.strip())
+        if not cid:
+            return ""
+        if cid not in cited:
+            cited.append(cid)
+        number = cited.index(cid) + 1
+        title = html.escape(source_titles.get(normalize_source_id(cid), ""), quote=True)
+        tip = f' title="{title}"' if title else ""
+        return f"<sup{tip}>[{number}]</sup>"
+
+    source = str(text or "")
+    source = source.replace("<", "&lt;")
+    source = _CITATION_RE.sub(citation, source)
+    source = _OTHER_DIRECTIVE_RE.sub("", source)
+    source = re.sub(r"\$(?=\s?\d)", CURRENCY_SYMBOL, source)
+    # Any remaining "$" would start LaTeX in Streamlit's markdown.
+    source = source.replace("$", "\\$")
+    source = _GLUED_HEADING_MARKER_RE.sub(r"\1\n\n\2 ", source)
+
+    lines: List[str] = []
+    for raw in source.split("\n"):
+        trimmed = raw.strip()
+        if len(trimmed) > 60 and not re.match(r"^[|\-*\d]", trimmed):
+            match = _GLUED_HEADING_LINE_RE.match(trimmed)
+            if match and len(match.group(1)) <= 45:
+                rest = trimmed[trimmed.index(match.group(1)) + len(match.group(1)):]
+                lines.extend([f"### {match.group(1)}", "", rest])
+                continue
+        lines.append(raw)
+    return "\n".join(lines), cited
+
+
+def split_table_row(row: str) -> List[str]:
+    row = row.strip()
+    row = row[1:] if row.startswith("|") else row
+    row = row[:-1] if row.endswith("|") else row
+    return [cell.strip() for cell in row.split("|")]
+
+
+def split_blocks(text: str) -> List[Dict[str, Any]]:
+    lines = text.split("\n")
+    blocks: List[Dict[str, Any]] = []
+    buffer: List[str] = []
+    i = 0
+    while i < len(lines):
+        line = lines[i].strip()
+        if line.startswith("|") and i + 1 < len(lines) and _TABLE_SEPARATOR_RE.match(lines[i + 1].strip()):
+            if buffer:
+                blocks.append({"type": "text", "text": "\n".join(buffer)})
+                buffer = []
+            raw = [lines[i], lines[i + 1]]
+            head = split_table_row(line)
+            body: List[List[str]] = []
+            i += 2
+            while i < len(lines) and lines[i].strip().startswith("|"):
+                raw.append(lines[i])
+                body.append(split_table_row(lines[i]))
+                i += 1
+            blocks.append({"type": "table", "raw": raw, "head": head, "body": body})
+            continue
+        buffer.append(lines[i])
+        i += 1
+    if buffer:
+        blocks.append({"type": "text", "text": "\n".join(buffer)})
+    return blocks
+
+
+def clean_cell(cell: str) -> str:
+    cell = re.sub(r"<[^>]+>", "", cell)
+    cell = re.sub(r"\[([^\]]+)\]\((?:https?://)[^)\s]+\)", r"\1", cell)
+    cell = cell.replace("**", "").replace("__", "").replace("`", "").replace("\\$", "$")
+    return html.unescape(cell).strip()
+
+
+def render_answer(content: str, uid: str, source_titles: Optional[Dict[str, str]] = None) -> List[str]:
+    text, cited = prepare_text(content, source_titles)
+    for index, block in enumerate(split_blocks(text)):
+        if block["type"] == "text":
+            if block["text"].strip():
+                st.markdown(block["text"], unsafe_allow_html=True)
+            continue
+
+        st.markdown("\n".join(block["raw"]), unsafe_allow_html=True)
+        columns = [clean_cell(c) for c in block["head"]]
+        rows = normalize_rows(columns, [[clean_cell(c) for c in row] for row in block["body"]])
+        base = f"TNS-table-{index + 1}"
+        slots = st.columns([1, 1, 5] if EXCEL_ENGINE else [1, 6])
+        with slots[0]:
+            csv_button(columns, rows, base, f"{uid}_md{index}")
+        if EXCEL_ENGINE:
+            with slots[1]:
+                excel_button(columns, rows, base, f"{uid}_md{index}", allow_formatted=True)
+    return cited
+
+
+# =====================================================================
+# Tables
+# =====================================================================
+
+def render_table(table: Dict[str, Any], conversation_id: str, message_id: str, key: str):
+    columns = [str(c) for c in (table.get("columns") or [])]
+    rows = normalize_rows(columns, table.get("rows") or []) if columns else []
+    title = table.get("title") or "Query result"
+    base = file_safe_name(title)
+    displayed = table.get("displayed_row_count", len(rows))
+    total = int(table.get("row_count") or displayed or 0)
+    truncated = bool(table.get("truncated")) or total > displayed
+
+    with st.container(border=True):
+        st.markdown(f"**{title}**")
+        meta = f"{indian_format(total, 0, 0)} row(s)"
+        if truncated:
+            meta += f" · showing first {indian_format(displayed, 0, 0)}"
+        st.caption(meta)
+        if table.get("description"):
+            st.caption(table["description"])
+
+        if not columns:
+            st.info(table.get("error") or "No tabular result was returned.")
+            return
+
+        slot_widths = [1, 1, 1.9, 1.3, 2.4]
+        slots = st.columns(slot_widths)
+        with slots[0]:
+            if rows:
+                csv_button(columns, rows, base, key)
+        with slots[1]:
+            if rows:
+                excel_button(columns, rows, base, key)
+        with slots[2]:
+            if truncated:
+                full_csv_control(table, conversation_id, message_id, key)
+        show_code = False
+        with slots[3]:
+            if table.get("query"):
+                show_code = st.toggle("Show code", key=f"code_{key}")
+
+        if show_code:
+            st.code(table["query"], language="sql")
+
+        frame = pd.DataFrame(
+            [[format_cell(v, c) for v, c in zip(row, columns)] for row in rows],
+            columns=unique_columns(columns),
+        )
+        height = int(min(440, 38 * (len(rows) + 1) + 3))
+        wide(st.dataframe, frame, hide_index=True, height=height)
+
+        if truncated:
+            st.caption("Only the first rows are shown here; use Full CSV for the complete TNS query result.")
+        if table.get("error"):
+            st.caption(str(table["error"]))
+
+
+# =====================================================================
+# Charts
+# =====================================================================
+
+_SERIES_GROUPS = [
+    ["quantity", "qty", "units", "unit"],
+    ["revenue", "sales", "amount", "value"],
+    ["orders", "order", "transactions", "transaction", "invoices", "invoice", "bills"],
+]
+
+
+def _series_group(name: Any) -> int:
+    text = normalize_name(name)
+    for index, words in enumerate(_SERIES_GROUPS):
+        if any(w in text for w in words):
+            return index
+    return -1
+
+
+def is_iso_date(value: Any) -> bool:
+    return bool(re.match(r"^\d{4}-\d{2}-\d{2}([T ]|$)", str(value)))
+
+
+def format_chart_label(value: Any, monthly: bool) -> str:
     if not is_iso_date(value):
         return str(value)
     try:
-        date = pd.to_datetime(str(value), utc=True)
-        if monthly:
-            return date.strftime("%b %Y")
-        return date.strftime("%d %b %Y")
-    except Exception:
+        date = datetime.strptime(str(value)[:10], "%Y-%m-%d")
+    except ValueError:
         return str(value)
-
-
-def title_tokens(text: str) -> List[str]:
-    return re.findall(r"[a-z0-9]+", text.lower())
-
-
-def column_matches_group(column: str, group: str) -> bool:
-    normalized = normalize_column_name(column)
-    words = _SERIES_GROUPS.get(group, ())
-    return any(word in normalized for word in words)
-
-
-def title_mentions_group(title: str, group: str) -> bool:
-    normalized = normalize_column_name(title)
-    words = _SERIES_GROUPS.get(group, ())
-    return any(word in normalized for word in words)
-
-
-def infer_requested_groups(viz: Dict[str, Any]) -> List[str]:
-    text = " ".join(
-        str(viz.get(key) or "")
-        for key in ("title", "description", "chart_type", "type")
-    ).lower()
-
-    # More specific semantic groups first.
-    ordered = [
-        "margin",
-        "profit",
-        "forecast",
-        "cost",
-        "revenue",
-        "quantity",
-        "orders",
-    ]
-
-    groups = [group for group in ordered if title_mentions_group(text, group)]
-
-    # "profit margin" should be a margin chart, not merely profit.
-    if "margin" in groups:
-        groups = ["margin"] + [g for g in groups if g != "margin"]
-
-    return groups
-
-
-def infer_chart_type(viz: Dict[str, Any], df: pd.DataFrame) -> str:
-    hint = " ".join(
-        str(viz.get(key) or "")
-        for key in ("chart_type", "type", "title", "description")
-    ).lower()
-
-    if "pie" in hint or "donut" in hint:
-        return "pie"
-
-    first_col_is_date = bool(len(df) and df.iloc[:, 0].map(is_iso_date).all())
-
-    if first_col_is_date or any(word in hint for word in ("line", "trend", "over time", "monthly", "weekly", "daily")):
-        return "line"
-
-    return "bar"
+    return date.strftime("%b %Y") if monthly else f"{date.day} {date.strftime('%b %Y')}"
 
 
 def find_source_table(viz: Dict[str, Any], tables: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    """Strictly resolve the visualization to its query attachment.
-
-    We intentionally DO NOT fall back to an arbitrary table. That was one of
-    the causes of meaningless charts: a visualization could accidentally use
-    the last numerical table in the message instead of the query that Genie
-    associated with that visualization.
-    """
-    query_attachment_id = viz.get("query_attachment_id")
-    if not query_attachment_id:
-        return None
-
-    normalized_target = str(query_attachment_id)
-    for table in tables:
-        if str(table.get("attachment_id") or "") == normalized_target:
-            return table
-    return None
-
-
-def choose_measure_columns(
-    df: pd.DataFrame,
-    viz: Dict[str, Any],
-) -> Tuple[List[str], str]:
-    numeric_columns: List[str] = []
-    for column in df.columns[1:]:
-        values = df[column].dropna()
-        if not values.empty and values.map(is_numeric_value).all():
-            numeric_columns.append(str(column))
-
-    if not numeric_columns:
-        return [], "number"
-
-    requested_groups = infer_requested_groups(viz)
-
-    preferred: List[str] = []
-    for group in requested_groups:
-        for column in numeric_columns:
-            if column_matches_group(column, group) and column not in preferred:
-                preferred.append(column)
-
-    # If the visualization title does not identify the measure, use the first
-    # numeric column's semantic kind and keep related columns such as actual /
-    # predicted / lower / upper bounds together.
-    if not preferred:
-        first_kind = column_kind(numeric_columns[0])
-        preferred = [
-            column for column in numeric_columns
-            if column_kind(column) == first_kind
-        ]
-
-    # Forecasts are special: if the result contains actual + predicted + bounds,
-    # show those together rather than only one arbitrary numerical column.
-    forecast_like = [
-        column for column in numeric_columns
-        if any(
-            token in normalize_column_name(column)
-            for token in ("actual", "forecast", "predicted", "prediction", "lower", "upper", "bound")
-        )
-    ]
-    if "forecast" in requested_groups and forecast_like:
-        preferred = forecast_like
-
-    preferred = preferred[:5]
-    first_kind = column_kind(preferred[0]) if preferred else column_kind(numeric_columns[0])
-
-    # Add compatible secondary series only when they are semantically related.
-    selected = list(preferred)
-    for column in numeric_columns:
-        if column in selected:
+    for attachment_id in (viz.get("query_attachment_id"), viz.get("attachment_id")):
+        if not attachment_id:
             continue
-        if len(selected) >= 5:
-            break
-        if column_kind(column) == first_kind:
-            normalized = normalize_column_name(column)
-            if any(
-                token in normalized
-                for token in ("actual", "forecast", "predicted", "prediction", "target", "budget", "plan")
-            ):
-                selected.append(column)
-
-    return selected, first_kind
+        for table in tables:
+            if table.get("attachment_id") == attachment_id:
+                return table
+    return tables[-1] if tables else None
 
 
-def build_chart_dataframe(
-    table: Dict[str, Any],
-    viz: Dict[str, Any],
-) -> Optional[Tuple[pd.DataFrame, List[str], str, str, bool]]:
-    columns = table.get("columns") or []
-    rows = table.get("rows") or []
+def build_chart_spec(table: Dict[str, Any], viz: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    columns = [str(c) for c in (table.get("columns") or [])]
+    rows = normalize_rows(columns, (table.get("rows") or [])[:50]) if columns else []
     if len(columns) < 2 or not rows:
         return None
 
-    # Keep the complete displayed Genie result. Do not randomly sample it.
-    df = pd.DataFrame(rows, columns=columns)
-
-    # Normalize numeric values only in selected measure columns.
-    measures, first_kind = choose_measure_columns(df, viz)
-    if not measures:
+    numeric_columns = []
+    for c in range(1, len(columns)):
+        values = [numeric_value(row[c]) for row in rows if row[c] not in (None, "")]
+        if values and all(v is not None for v in values):
+            numeric_columns.append(c)
+    if not numeric_columns:
         return None
 
-    for column in measures:
-        df[column] = pd.to_numeric(df[column], errors="coerce")
+    date_axis = all(is_iso_date(row[0]) for row in rows)
+    monthly = date_axis and all(re.match(r"^\d{4}-\d{2}-01", str(row[0])) for row in rows)
+    hint = " ".join(str(viz.get(k) or "") for k in ("chart_type", "type", "title")).lower()
+    chart_type = "line" if (date_axis or re.search(r"line|trend", hint)) else "bar"
 
-    x_column = str(df.columns[0])
-    date_axis = bool(df[x_column].map(is_iso_date).all())
-    monthly = date_axis and bool(
-        df[x_column].astype(str).str.match(r"^\d{4}-\d{2}-01").all()
-    )
-
-    # Friendly display labels, while retaining the original source values.
-    display_x = f"__display_{x_column}"
-    df[display_x] = df[x_column].map(lambda value: format_axis_label(value, monthly))
-
-    chart_type = infer_chart_type(viz, df)
-
-    # Pie charts only make sense for a small part-to-whole result.
-    if chart_type == "pie":
-        if len(df) > 8:
-            chart_type = "bar"
-        elif len(measures) != 1:
-            chart_type = "bar"
-
-    return df, measures, chart_type, first_kind, date_axis
-
-
-def build_altair_chart(
-    table: Dict[str, Any],
-    viz: Dict[str, Any],
-) -> Optional[Tuple[alt.Chart, pd.DataFrame, str]]:
-    built = build_chart_dataframe(table, viz)
-    if not built:
-        return None
-
-    df, measures, chart_type, first_kind, date_axis = built
-    x_column = str(df.columns[0])
-    display_x = f"__display_{x_column}"
-
-    title = str(viz.get("title") or "Genie visualization")
-    description = str(viz.get("description") or "")
-
-    tooltip_fields = [
-        alt.Tooltip(display_x + ":N", title=x_column),
+    title_text = str(viz.get("title") or "").lower()
+    title_groups = [
+        group
+        for group, words in enumerate(_SERIES_GROUPS)
+        if any(re.search(rf"\b{w}s?\b", title_text) for w in words)
     ]
-    for measure in measures:
-        tooltip_fields.append(
-            alt.Tooltip(
-                f"{measure}:Q",
-                title=measure,
-                format=",.2f",
-            )
-        )
+    preferred = [c for c in numeric_columns if _series_group(columns[c]) in title_groups]
+    if not preferred:
+        first_kind = column_kind(columns[numeric_columns[0]])
+        preferred = [c for c in numeric_columns if column_kind(columns[c]) == first_kind]
 
-    base = alt.Chart(df).properties(
-        title=alt.TitleParams(
-            text=title,
-            anchor="start",
-            fontSize=17,
-            **({"subtitle": description, "subtitleFontSize": 12} if description else {}),
-        ),
-        height=max(340, min(650, 80 + len(df) * 24)) if chart_type == "bar" and len(df) > 12 else 360,
+    preferred_set = set(preferred)
+    first_kind = column_kind(columns[preferred[0]])
+    ordered = preferred + [c for c in numeric_columns if c not in preferred_set]
+
+    datasets = [
+        {
+            "label": columns[c],
+            "kind": column_kind(columns[c]),
+            # All Genie result series are visible by default. Users can still
+            # toggle individual series from the legend, but no data is hidden
+            # on first render.
+            "hidden": False,
+            "data": [numeric_value(row[c]) for row in rows],
+        }
+        for c in ordered[:5]
+    ]
+    return {
+        "type": chart_type,
+        "labels": [format_chart_label(row[0], monthly) for row in rows],
+        "datasets": datasets,
+        "first_kind": first_kind,
+        "horizontal": chart_type == "bar" and len(rows) > 12,
+    }
+
+
+def nice_ticks(vmin: float, vmax: float, target: int = 5) -> Optional[List[float]]:
+    if not (math.isfinite(vmin) and math.isfinite(vmax)) or vmax <= vmin:
+        return None
+    raw = (vmax - vmin) / target
+    magnitude = 10 ** math.floor(math.log10(raw))
+    step = magnitude * 10
+    for multiplier in (1, 2, 2.5, 5, 10):
+        if raw <= multiplier * magnitude:
+            step = multiplier * magnitude
+            break
+    start = math.floor(vmin / step) * step
+    end = math.ceil(vmax / step) * step
+    count = min(int(round((end - start) / step)) + 1, 14)
+    return [round(start + i * step, 10) for i in range(count)]
+
+
+def build_figure(spec: Dict[str, Any]):
+    horizontal = spec["horizontal"]
+    labels = spec["labels"]
+    fig = go.Figure()
+
+    for index, dataset in enumerate(spec["datasets"]):
+        color = CHART_COLORS[index % len(CHART_COLORS)]
+        hover = [
+            f"{label}<br>{dataset['label']}: {format_chart_value(value, dataset['kind'])}"
+            for label, value in zip(labels, dataset["data"])
+        ]
+        common = dict(
+            name=dataset["label"],
+            visible="legendonly" if dataset["hidden"] else True,
+            hovertext=hover,
+            hovertemplate="%{hovertext}<extra></extra>",
+        )
+        if spec["type"] == "line":
+            fig.add_trace(go.Scatter(
+                x=labels, y=dataset["data"], mode="lines+markers",
+                line=dict(color=color, width=3),
+                marker=dict(color=color, size=7, line=dict(width=1, color="#ffffff")),
+                connectgaps=False, **common,
+            ))
+        elif horizontal:
+            # Put labels just outside the bars. This avoids the dense,
+            # overlapping text produced by Plotly's automatic placement on
+            # grouped horizontal bars. The axis range is padded below so the
+            # labels have room to breathe.
+            fig.add_trace(go.Bar(
+                y=labels, x=dataset["data"], orientation="h",
+                marker=dict(color=color, line=dict(width=0)),
+                **common,
+            ))
+        else:
+            fig.add_trace(go.Bar(
+                x=labels, y=dataset["data"],
+                marker=dict(color=color, line=dict(width=0)),
+                **common,
+            ))
+
+    visible_values = [
+        v for ds in spec["datasets"] if not ds["hidden"] for v in ds["data"] if v is not None
+    ]
+    value_axis: Dict[str, Any] = dict(
+        gridcolor="#e5e7eb", gridwidth=1, zeroline=True, zerolinecolor="#cbd5e1",
+        tickfont=dict(color="#344054", size=11),
+        title_font=dict(color="#172033", size=12),
+        linecolor="#d0d5dd", linewidth=1,
+    )
+    if visible_values:
+        ticks = nice_ticks(min(0.0, min(visible_values)), max(0.0, max(visible_values)))
+        if ticks:
+            value_axis.update(
+                tickvals=ticks,
+                ticktext=[format_compact_chart_value(t, spec["first_kind"]) for t in ticks],
+                tickangle=0,
+                nticks=min(7, len(ticks)),
+            )
+
+    category_axis: Dict[str, Any] = dict(
+        type="category", categoryorder="array", categoryarray=labels,
+        automargin=True, showgrid=False,
+        tickfont=dict(color="#344054", size=11),
+        linecolor="#d0d5dd", linewidth=1,
     )
 
-    if chart_type == "pie":
-        measure = measures[0]
-        chart = (
-            base.mark_arc(innerRadius=55)
-            .encode(
-                theta=alt.Theta(field=measure, type="quantitative"),
-                color=alt.Color(
-                    field=display_x,
-                    type="nominal",
-                    title=x_column,
-                    legend=alt.Legend(orient="right"),
-                ),
-                tooltip=tooltip_fields,
-            )
-            .interactive()
-        )
-        return chart, df, first_kind
-
-    if chart_type == "line":
-        layers = []
-        for measure in measures:
-            line = (
-                alt.Chart(df)
-                .mark_line(point=True, strokeWidth=2.5)
-                .encode(
-                    x=alt.X(
-                        f"{display_x}:N",
-                        title=x_column,
-                        sort=None,
-                        axis=alt.Axis(labelAngle=-35),
-                    ),
-                    y=alt.Y(
-                        f"{measure}:Q",
-                        title=format_axis_title(measure, first_kind),
-                        axis=alt.Axis(format=axis_format(first_kind)),
-                    ),
-                    color=alt.value(chart_color(len(layers))),
-                    tooltip=tooltip_fields,
-                )
-            )
-            layers.append(line)
-
-        chart = alt.layer(*layers).resolve_scale(y="shared").properties(
-            title=alt.TitleParams(
-                text=title,
-                subtitle=description or "",
-                anchor="start",
-                fontSize=17,
-                subtitleFontSize=12,
-            ),
-            height=360,
-        ).interactive()
-        return chart, df, first_kind
-
-    # Bar chart. For many categories, use a horizontal layout for readability.
-    horizontal = len(df) > 12
+    longest_label = max((len(str(label)) for label in labels), default=0)
     if horizontal:
-        y = alt.Y(
-            f"{display_x}:N",
-            title=x_column,
-            sort="-x",
-            axis=alt.Axis(labelLimit=260),
-        )
-        x = alt.X(
-            f"{measures[0]}:Q",
-            title=format_axis_title(measures[0], first_kind),
-            axis=alt.Axis(format=axis_format(first_kind)),
-        )
-        layers = []
-        for index, measure in enumerate(measures):
-            bar = (
-                alt.Chart(df)
-                .mark_bar(cornerRadiusTopRight=4, cornerRadiusBottomRight=4)
-                .encode(
-                    y=y,
-                    x=alt.X(
-                        f"{measure}:Q",
-                        title=format_axis_title(measure, column_kind(measure)),
-                        axis=alt.Axis(format=axis_format(column_kind(measure))),
-                    ),
-                    color=alt.value(chart_color(index)),
-                    tooltip=tooltip_fields,
-                )
-            )
-            layers.append(bar)
-        chart = alt.layer(*layers).resolve_scale(x="independent")
+        # Give long vendor/category labels real room instead of letting Plotly
+        # squeeze them against the plot area.
+        left_margin = min(430, max(150, longest_label * 6 + 35))
+        height = max(430, min(900, len(labels) * 31 + 130))
+        margin = dict(l=left_margin, r=55, t=80, b=55)
     else:
-        x = alt.X(
-            f"{display_x}:N",
-            title=x_column,
-            sort=None,
-            axis=alt.Axis(labelAngle=-35, labelLimit=180),
-        )
-        layers = []
-        for index, measure in enumerate(measures):
-            bar = (
-                alt.Chart(df)
-                .mark_bar(cornerRadiusTopLeft=4, cornerRadiusTopRight=4)
-                .encode(
-                    x=x,
-                    y=alt.Y(
-                        f"{measure}:Q",
-                        title=format_axis_title(measure, column_kind(measure)),
-                        axis=alt.Axis(format=axis_format(column_kind(measure))),
-                    ),
-                    color=alt.value(chart_color(index)),
-                    tooltip=tooltip_fields,
-                )
-            )
-            layers.append(bar)
-        chart = alt.layer(*layers).resolve_scale(y="independent")
+        margin = dict(l=70, r=35, t=75, b=75)
+        height = 390
 
-    chart = chart.properties(
-        title=alt.TitleParams(
-            text=title,
-            anchor="start",
-            fontSize=17,
-            **({"subtitle": description, "subtitleFontSize": 12} if description else {}),
+    fig.update_layout(
+        template="plotly_white",
+        height=height,
+        margin=margin,
+        paper_bgcolor="#ffffff",
+        plot_bgcolor="#ffffff",
+        showlegend=len(spec["datasets"]) > 1,
+        legend=dict(
+            orientation="h", yanchor="bottom", y=1.01,
+            xanchor="left", x=0,
+            font=dict(color="#344054", size=11),
+            bgcolor="rgba(255,255,255,0)",
         ),
-        height=max(340, min(650, 80 + len(df) * 24)) if horizontal else 360,
-    ).interactive()
-
-    return chart, df, first_kind
-
-
-def chart_color(index: int) -> str:
-    # Deliberately controlled, restrained palette. These are chart-rendering
-    # colors, not data values; the data itself always comes from Genie.
-    colors = ["#2563eb", "#f59e0b", "#10b981", "#ef4444", "#8b5cf6"]
-    return colors[index % len(colors)]
-
-
-def axis_format(kind: str) -> str:
-    if kind == "currency":
-        return ",.2s"
-    if kind == "percent":
-        return ".1f"
-    return ",.2f"
-
-
-def format_axis_title(column: str, kind: str) -> str:
-    if kind == "currency":
-        return f"{column} (₹)"
-    if kind == "percent":
-        return f"{column} (%)"
-    return column
-
-
-def chart_to_png(df: pd.DataFrame, measures: List[str], chart_type: str, title: str, first_kind: str) -> bytes:
-    """Create a deterministic downloadable PNG from the SAME chart data.
-
-    The on-screen chart is Altair/Vega-Lite. This fallback export uses
-    matplotlib only for downloading because Streamlit/Altair PNG export may
-    require an additional browser renderer package. It never changes the
-    on-screen chart or selects different data.
-    """
-    import matplotlib.pyplot as plt
-
-    fig = plt.figure(figsize=(12, 6.5))
-    ax = fig.add_subplot(111)
-
-    x = df.iloc[:, 0].astype(str).tolist()
-    display_x = [format_axis_label(value, False) for value in x]
-
-    if chart_type == "pie" and measures:
-        values = pd.to_numeric(df[measures[0]], errors="coerce").fillna(0)
-        ax.pie(values, labels=display_x, autopct="%1.1f%%")
-    elif chart_type == "line":
-        for measure in measures:
-            ax.plot(display_x, pd.to_numeric(df[measure], errors="coerce"), marker="o", label=measure)
-        if len(measures) > 1:
-            ax.legend()
-        ax.tick_params(axis="x", rotation=35)
+        barmode="group",
+        bargap=0.28,
+        font=dict(family="Inter, -apple-system, Segoe UI, sans-serif", size=12, color="#172033"),
+        hoverlabel=dict(bgcolor="#111827", font_color="#ffffff", font_size=12),
+    )
+    if horizontal:
+        # Keep a clean quantitative scale. Data labels are intentionally
+        # omitted from bars; values remain available through hover.
+        if visible_values:
+            positive_max = max(visible_values)
+            negative_min = min(visible_values)
+            span = max(abs(positive_max), abs(negative_min), 1.0)
+            pad = span * 0.05
+            value_axis["range"] = [min(0.0, negative_min) - pad * 0.10, positive_max + pad]
+        fig.update_xaxes(**value_axis)
+        fig.update_yaxes(autorange="reversed", **category_axis)
     else:
-        if len(measures) == 1:
-            values = pd.to_numeric(df[measures[0]], errors="coerce").fillna(0)
-            if len(df) > 12:
-                ax.barh(display_x, values)
-                ax.set_xlabel(format_axis_title(measures[0], first_kind))
-            else:
-                ax.bar(display_x, values)
-                ax.tick_params(axis="x", rotation=35)
-                ax.set_ylabel(format_axis_title(measures[0], first_kind))
-        else:
-            width = 0.8 / len(measures)
-            positions = list(range(len(df)))
-            for index, measure in enumerate(measures):
-                values = pd.to_numeric(df[measure], errors="coerce").fillna(0)
-                offset = [p - 0.4 + width / 2 + index * width for p in positions]
-                ax.bar(offset, values, width=width, label=measure)
-            ax.set_xticks(positions)
-            ax.set_xticklabels(display_x, rotation=35, ha="right")
-            ax.legend()
+        fig.update_yaxes(**value_axis)
+        fig.update_xaxes(tickangle=-45 if len(labels) > 10 else 0, **category_axis)
+    return fig
 
-    ax.set_title(title, loc="left", pad=15, fontweight="bold")
-    fig.tight_layout()
 
-    buffer = io.BytesIO()
-    fig.savefig(buffer, format="png", dpi=160, bbox_inches="tight")
-    plt.close(fig)
-    return buffer.getvalue()
+@st.cache_data(show_spinner=False, ttl=3600, max_entries=32)
+def fetch_visualization_png(conversation_id: str, message_id: str, attachment_id: str) -> bytes:
+    return call_genie(
+        lambda client: client.download_visualization(conversation_id, message_id, attachment_id)
+    )
 
 
 def render_visualization(
@@ -880,230 +1066,193 @@ def render_visualization(
     tables: List[Dict[str, Any]],
     conversation_id: str,
     message_id: str,
-) -> Optional[str]:
-    """Render a Genie visualization from its actual query result.
-
-    Returns the source query attachment ID when successfully rendered, so the
-    caller can avoid rendering the same table again below the chart.
-    """
-    title = viz.get("title") or "Genie visualization"
-    table = find_source_table(viz, tables)
-
+    key: str,
+):
     with st.container(border=True):
-        st.markdown(f'<div class="chart-title">{html.escape(str(title))}</div>', unsafe_allow_html=True)
-        if viz.get("description"):
-            st.markdown(
-                f'<div class="chart-description">{html.escape(str(viz["description"]))}</div>',
-                unsafe_allow_html=True,
-            )
+        st.markdown(f"**{viz.get('title') or 'Visualization'}**")
+        table = find_source_table(viz, tables)
 
-        if table is None:
-            st.warning(
-                "Genie returned a visualization without a matching query attachment, "
-                "so no chart was fabricated from another table."
-            )
-            return None
+        if go is not None and table:
+            try:
+                spec = build_chart_spec(table, viz)
+                if spec:
+                    figure = build_figure(spec)
+                    wide(
+                        st.plotly_chart,
+                        figure,
+                        key=f"chart_{key}",
+                        config={
+                            "displaylogo": False,
+                            "responsive": True,
+                            "scrollZoom": True,
+                        },
+                    )
+                    st.caption(f"Source: {table.get('title') or 'Query result'}")
+                    with st.expander("View data"):
+                        render_table(table, conversation_id, message_id, f"{key}_data")
 
+                    # Keep Genie's native visualization available as the exact
+                    # original rendering/download; it is an alternate view,
+                    # not a replacement for the clear interactive chart above.
+                    attachment_id = viz.get("attachment_id")
+                    if attachment_id and message_id:
+                        try:
+                            image = fetch_visualization_png(conversation_id, message_id, attachment_id)
+                            st.download_button(
+                                "⬇ Original Genie chart (PNG)",
+                                data=image,
+                                file_name="TNS_genie_visualization.png",
+                                mime="image/png",
+                                key=f"viz_original_dl_{key}",
+                            )
+                        except Exception as exc:
+                            logger.debug("Original Genie visualization unavailable: %s", exc)
+                    return
+            except Exception as exc:
+                logger.warning("Plotly chart failed; retaining native Genie visualization: %s", exc)
+
+        attachment_id = viz.get("attachment_id")
+        if not attachment_id or not message_id:
+            st.info("This visualization is not available.")
+            return
         try:
-            built = build_chart_dataframe(table, viz)
-            if not built:
-                st.warning("The Genie query result does not contain a chartable dimension and measure.")
-                return None
-
-            df, measures, chart_type, first_kind, _ = built
-            chart_result = build_altair_chart(table, viz)
-            if not chart_result:
-                st.warning("The Genie query result could not be converted into a chart.")
-                return None
-
-            chart, _, _ = chart_result
-            st.altair_chart(chart, use_container_width=True)
-
-            st.markdown(
-                f'<div class="chart-source">Source: {html.escape(str(table.get("title") or "Query result"))}</div>',
-                unsafe_allow_html=True,
-            )
-
-            # Keep the actual data available, just as the original FastAPI UI
-            # exposed "View data" below a native chart.
-            with st.expander("View data", expanded=False):
-                source_df = pd.DataFrame(
-                    table.get("rows") or [],
-                    columns=table.get("columns") or [],
-                )
-                st.dataframe(source_df, use_container_width=True, hide_index=True)
-
-            png = chart_to_png(
-                df=df,
-                measures=measures,
-                chart_type=chart_type,
-                title=str(title),
-                first_kind=first_kind,
-            )
+            image = fetch_visualization_png(conversation_id, message_id, attachment_id)
+            wide(st.image, image)
             st.download_button(
-                "Download chart",
-                data=png,
-                file_name="genie_visualization.png",
+                "⬇ Chart (PNG)",
+                data=image,
+                file_name="TNS_visualization.png",
                 mime="image/png",
-                key=f"viz_download_{conversation_id}_{message_id}_{viz.get('attachment_id') or title}",
+                key=f"viz_dl_{key}",
             )
-
-            return str(table.get("attachment_id") or "")
         except Exception as exc:
-            logger.exception("Semantic Genie chart rendering failed")
-            st.error(f"Could not render the Genie chart: {exc}")
-            return None
+            logger.warning("Visualization retrieval failed: %s", exc)
+            st.warning("The analytical response was returned, but this visualization could not be loaded.")
 
 
-# ============================================================================
-# Presentation rendering
-# ============================================================================
+# =====================================================================
+# Messages
+# =====================================================================
 
-def render_thoughts(thoughts):
+def render_thoughts(thoughts: List[Any], uid: str):
     if not thoughts:
         return
     with st.expander("Thought process", expanded=False):
+        number = 0
         for thought in thoughts:
             content = thought.get("content") if isinstance(thought, dict) else str(thought)
-            if content:
-                st.markdown(content)
+            if not content:
+                continue
+            number += 1
+            text, _ = prepare_text(content)
+            st.markdown(f"**{number}.** {text}", unsafe_allow_html=True)
 
 
-def render_presentation(
-    presentation: Dict[str, Any],
-    conversation_id: str,
-    message_id: str,
-) -> None:
-    if not presentation:
-        return
+def presentation_parts(presentation: Dict[str, Any]):
+    blocks = presentation.get("blocks") or []
 
-    thoughts = presentation.get("thoughts") or []
-    if not thoughts:
-        for block in presentation.get("blocks") or []:
-            if block.get("type") == "thoughts":
-                thoughts = block.get("data") or []
-                break
-    render_thoughts(thoughts)
+    def from_blocks(block_type: str) -> List[Any]:
+        return [b.get("data") for b in blocks if b.get("type") == block_type and b.get("data") is not None]
 
-    visualizations = presentation.get("visualizations") or []
-    if not visualizations:
-        visualizations = [
-            b.get("data")
-            for b in presentation.get("blocks") or []
-            if b.get("type") == "visualization"
-        ]
-    visualizations = [v for v in visualizations if isinstance(v, dict)]
+    thoughts = presentation.get("thoughts") or (from_blocks("thoughts") or [[]])[0]
+    tables = presentation.get("tables") or from_blocks("table")
+    visualizations = presentation.get("visualizations") or from_blocks("visualization")
+    suggested = presentation.get("suggested_questions") or (from_blocks("suggested_questions") or [[]])[0]
+    return thoughts, tables, visualizations, suggested
 
-    tables = presentation.get("tables") or []
-    if not tables:
-        tables = [
-            b.get("data")
-            for b in presentation.get("blocks") or []
-            if b.get("type") == "table"
-        ]
-    tables = [t for t in tables if isinstance(t, dict)]
 
-    chart_source_ids = set()
-    for viz in visualizations:
-        source_id = render_visualization(
-            viz,
-            tables,
-            conversation_id,
-            message_id,
-        )
-        if source_id:
-            chart_source_ids.add(source_id)
-
-    # Only hide a table when it is EXACTLY the query attachment used by a
-    # successfully rendered visualization. Never hide a table based on a
-    # guessed/fallback association.
+def source_title_map(tables: List[Dict[str, Any]], visualizations: List[Dict[str, Any]]) -> Dict[str, str]:
+    titles: Dict[str, str] = {}
     for table in tables:
-        attachment_id = str(table.get("attachment_id") or "")
-        if attachment_id in chart_source_ids:
+        if table.get("attachment_id"):
+            titles[normalize_source_id(table["attachment_id"])] = table.get("title") or "Query result"
+    for viz in visualizations:
+        source = find_source_table(viz, tables)
+        label = (source or {}).get("title") or viz.get("title") or "Visualization"
+        for field in ("attachment_id", "query_attachment_id"):
+            if viz.get(field):
+                titles.setdefault(normalize_source_id(viz[field]), label)
+    return titles
+
+
+def render_assistant(content: str, presentation: Dict[str, Any], conversation_id: str,
+                     message_id: str, uid: str, show_suggestions: bool):
+    thoughts, tables, visualizations, suggested = presentation_parts(presentation or {})
+    titles = source_title_map(tables, visualizations)
+
+    # Layout mirrors the web UI: thought process, report, charts, tables, suggestions.
+    render_thoughts(thoughts, uid)
+    cited = render_answer(content, uid, titles)
+
+    sources = [
+        f"[{number}] {titles[normalize_source_id(cid)]}"
+        for number, cid in enumerate(cited, start=1)
+        if normalize_source_id(cid) in titles
+    ]
+    if sources:
+        st.caption("Sources: " + " · ".join(sources))
+
+    chart_sources = set()
+    for index, viz in enumerate(visualizations):
+        render_visualization(viz, tables, conversation_id, message_id, f"{uid}_v{index}")
+        source = find_source_table(viz, tables)
+        if source:
+            chart_sources.add(source.get("attachment_id"))
+
+    for index, table in enumerate(tables):
+        if table.get("attachment_id") in chart_sources:
             continue
-        render_table(table, conversation_id, message_id)
+        render_table(table, conversation_id, message_id, f"{uid}_t{index}")
 
-    suggestions = presentation.get("suggested_questions") or []
-    if not suggestions:
-        for block in presentation.get("blocks") or []:
-            if block.get("type") == "suggested_questions":
-                suggestions = block.get("data") or []
-                break
-
-    if suggestions:
-        st.markdown(
-            '<div class="section-label">Suggested questions</div>',
-            unsafe_allow_html=True,
-        )
-        for index, question in enumerate(suggestions):
-            if st.button(
-                question,
-                key=f"suggestion_{message_id}_{index}",
-                use_container_width=True,
-            ):
+    if suggested and show_suggestions:
+        st.markdown('<div class="section-label">Suggested questions</div>', unsafe_allow_html=True)
+        for index, question in enumerate(suggested):
+            if wide(st.button, question, key=f"suggestion_{uid}_{index}"):
                 st.session_state.pending_prompt = question
                 st.rerun()
 
 
-def render_message(message: Dict[str, Any], conversation_id: str) -> None:
+def render_message(message: Dict[str, Any], conversation_id: str, uid: str, is_last: bool):
     role = message.get("role")
     content = message.get("content") or ""
-
     if role == "user":
-        safe = html.escape(content).replace("\n", "<br>")
-        st.markdown(f'<div class="user-bubble">{safe}</div>', unsafe_allow_html=True)
+        with st.chat_message("user"):
+            st.markdown(content.replace("$", "\\$"))
         return
 
-    st.markdown("<div class='assistant-bubble'>", unsafe_allow_html=True)
-    st.markdown(content)
-    st.markdown("</div>", unsafe_allow_html=True)
-
     presentation = message.get("presentation") or message.get("metadata") or {}
-    message_id = (
-        presentation.get("agent_message_id")
-        or message.get("message_id")
-        or ""
-    )
-    render_presentation(presentation, conversation_id, message_id)
+    message_id = presentation.get("agent_message_id") or message.get("message_id") or ""
+    with st.chat_message("assistant"):
+        render_assistant(content, presentation, conversation_id, message_id, uid, show_suggestions=is_last)
 
 
-# ============================================================================
-# Agent turn processing
-# ============================================================================
+# =====================================================================
+# Turn processing
+# =====================================================================
 
-async def run_agent_turn(
-    client: GenieClient,
-    message: str,
-    conversation_id: Optional[str],
-):
+async def run_agent_turn(client: GenieClient, message: str, conversation_id: Optional[str]):
     original = conversation_id
     rebound = False
-
     try:
         response = await client.create_agent_response(
-            message,
-            conversation_id=conversation_id,
-            enable_visualization=True,
+            message, conversation_id=conversation_id, enable_visualization=True
         )
     except GenieError as exc:
         if conversation_id and client.is_legacy_conversation_error(exc):
             rebound = True
             response = await client.create_agent_response(
-                message,
-                conversation_id=None,
-                enable_visualization=True,
+                message, conversation_id=None, enable_visualization=True
             )
         else:
             raise
 
     resolved = response.get("conversation_id") or (None if rebound else conversation_id)
     if not resolved:
-        raise GenieError("Genie Agent did not return a conversation ID.")
+        raise GenieError("TNS Agent did not return a conversation ID.")
 
     answer = client.normalize_answer_text(client.extract_agent_answer(response))
     presentation = await client.build_agent_presentation(response)
     message_id = presentation.get("agent_message_id") or response.get("id") or ""
-
     return {
         "answer": answer,
         "presentation": presentation,
@@ -1118,168 +1267,149 @@ def process_new_message(prompt: str):
     title = prompt.strip()
     if len(title) > 60:
         title = title[:57] + "..."
-
-    sid = store.create_session(
-        result["conversation_id"],
-        st.session_state.username,
-        title,
-    )
+    sid = store.create_session(result["conversation_id"], st.session_state.username, title)
     store.add_message(sid, st.session_state.username, "user", prompt)
-    store.add_message(
-        sid,
-        st.session_state.username,
-        "assistant",
-        result["answer"],
-        result["presentation"],
-    )
+    store.add_message(sid, st.session_state.username, "assistant", result["answer"], result["presentation"])
     st.session_state.active_chat_id = sid
     return result
 
 
 def process_followup(session_id: str, prompt: str):
-    conversation_id = store.get_conversation_id(
-        session_id,
-        st.session_state.username,
-    )
+    conversation_id = store.get_conversation_id(session_id, st.session_state.username)
     if not conversation_id:
         raise GenieError("Chat session not found.")
-
-    result = call_genie(
-        lambda client: run_agent_turn(client, prompt, conversation_id)
-    )
-
+    result = call_genie(lambda client: run_agent_turn(client, prompt, conversation_id))
     if result["conversation_changed"]:
-        store.set_conversation_id(
-            session_id,
-            st.session_state.username,
-            result["conversation_id"],
-        )
-
+        store.set_conversation_id(session_id, st.session_state.username, result["conversation_id"])
     store.add_message(session_id, st.session_state.username, "user", prompt)
-    store.add_message(
-        session_id,
-        st.session_state.username,
-        "assistant",
-        result["answer"],
-        result["presentation"],
-    )
+    store.add_message(session_id, st.session_state.username, "assistant", result["answer"], result["presentation"])
     return result
 
 
-# ============================================================================
-# Sidebar
-# ============================================================================
+# =====================================================================
+# Screens
+# =====================================================================
 
-def render_sidebar() -> None:
+def login_screen():
+    inject_css()
+    with st.form("login_form"):
+        st.markdown(
+            f'''<div class="login-heading">
+                <img class="login-logo" src="{LOGO_URL}" />
+                <div class="login-title">TNS Retail Intelligence</div>
+                <div class="login-sub">Sign in to access company analytics</div>
+            </div>''',
+            unsafe_allow_html=True,
+        )
+        username = st.text_input("Username", autocomplete="username")
+        password = st.text_input("Password", type="password", autocomplete="current-password")
+        submitted = wide(st.form_submit_button, "Sign in")
+    if submitted:
+        if check_credentials(username.strip(), password):
+            st.session_state.authenticated = True
+            st.session_state.username = username.strip()
+            st.session_state.active_chat_id = None
+            st.rerun()
+        else:
+            st.error("Invalid username or password.")
+
+
+def load_history(session_id: str):
+    history = store.get_history(session_id, st.session_state.username)
+    if history is None:
+        st.error("Chat session not found.")
+        return None
+    return history
+
+
+def render_sidebar():
     with st.sidebar:
         st.markdown(
             f'<div class="tns-brand"><img src="{LOGO_URL}"/><div class="tns-brand-name">TNS Retail Intelligence</div></div>',
             unsafe_allow_html=True,
         )
-
-        if st.button("＋  New Chat", use_container_width=True):
+        if wide(st.button, "＋  New Chat", key="new_chat"):
             st.session_state.active_chat_id = None
             st.session_state.pending_prompt = ""
             st.rerun()
-
-        st.markdown(
-            '<div class="section-label">Conversations</div>',
-            unsafe_allow_html=True,
-        )
-
-        sessions = get_sessions()
+        st.markdown('<div class="section-label">Conversations</div>', unsafe_allow_html=True)
+        sessions = store.list_sessions(st.session_state.username)
+        if not sessions:
+            st.caption("No conversations yet.")
+        active = st.session_state.get("active_chat_id")
         for session in sessions:
             label = session["title"] or "New Chat"
-            c1, c2 = st.columns([0.86, 0.14], gap="small")
+            c1, c2 = st.columns([0.84, 0.16], gap="small")
             with c1:
-                if st.button(
-                    label,
+                is_active = session["session_id"] == active
+                if wide(
+                    st.button, label,
                     key=f"chat_{session['session_id']}",
-                    use_container_width=True,
+                    type="primary" if is_active else "secondary",
                 ):
                     st.session_state.active_chat_id = session["session_id"]
                     st.session_state.pending_prompt = ""
                     st.rerun()
             with c2:
-                if st.button(
-                    "×",
-                    key=f"delete_{session['session_id']}",
-                    help="Delete conversation",
-                ):
-                    store.delete_session(
-                        session["session_id"],
-                        st.session_state.username,
-                    )
+                if st.button("✕", key=f"delete_{session['session_id']}", help="Delete conversation"):
+                    store.delete_session(session["session_id"], st.session_state.username)
                     if st.session_state.get("active_chat_id") == session["session_id"]:
                         st.session_state.active_chat_id = None
                     st.rerun()
-
         st.divider()
-        st.caption(st.session_state.username)
-
-        if st.button("Logout", use_container_width=True):
+        st.caption(f"Signed in as {st.session_state.username}")
+        if wide(st.button, "Logout", key="logout"):
             st.session_state.clear()
             st.rerun()
 
 
-# ============================================================================
-# Main application
-# ============================================================================
-
-def main_app() -> None:
+def main_app():
     inject_css()
     ensure_store()
     render_sidebar()
 
     active_id = st.session_state.get("active_chat_id")
+    pending = st.session_state.pop("pending_prompt", "")
+    typed = st.chat_input("Ask a question...", max_chars=5000)
+    prompt = pending or typed
+
     history = load_history(active_id) if active_id else None
     title = history["title"] if history else "New Chat"
 
     st.markdown(
-        f'''<div class="tns-header">
-            <div class="tns-header-title">{html.escape(str(title))}</div>
-            <div class="tns-header-subtitle">Business Intelligence Assistant</div>
-        </div>''',
+        f'''<div class="tns-header"><div class="tns-header-title">{html.escape(title)}</div><div class="tns-header-subtitle">Business Intelligence Assistant</div></div>''',
         unsafe_allow_html=True,
     )
 
     if history:
-        conversation_id = store.get_conversation_id(
-            active_id,
-            st.session_state.username,
-        )
-        for message in history["messages"]:
-            render_message(message, conversation_id)
-    else:
+        conversation_id = store.get_conversation_id(active_id, st.session_state.username)
+        messages = history["messages"]
+        for index, message in enumerate(messages):
+            render_message(message, conversation_id, f"{active_id}_{index}", is_last=(index == len(messages) - 1))
+    elif not prompt:
         st.markdown(
-            '''<div class="welcome">
-                <h1>How can I help you?</h1>
-                <p>Ask questions about company sales, products, stores, brands and more.</p>
-            </div>''',
+            '''<div class="welcome"><h1>How can I help you?</h1><p>Ask questions about company sales, products, stores, brands and more.</p></div>''',
             unsafe_allow_html=True,
         )
 
-    pending = st.session_state.pop("pending_prompt", "")
-    prompt = st.chat_input("Ask a question...", max_chars=5000)
-    if pending:
-        prompt = pending
-
     if prompt:
-        with st.spinner("Genie is analyzing your request..."):
-            try:
-                if active_id:
-                    process_followup(active_id, prompt)
-                else:
-                    process_new_message(prompt)
-                st.rerun()
-            except Exception as exc:
-                logger.exception("Genie request failed")
-                st.error(f"Request failed: {exc}")
+        with st.chat_message("user"):
+            st.markdown(prompt.replace("$", "\\$"))
+        succeeded = False
+        with st.chat_message("assistant"):
+            with st.spinner("TNS is analyzing your request..."):
+                try:
+                    if active_id:
+                        process_followup(active_id, prompt)
+                    else:
+                        process_new_message(prompt)
+                    succeeded = True
+                except Exception as exc:
+                    logger.exception("TNS request failed")
+                    st.error(f"Request failed: {exc}")
+        if succeeded:
+            st.rerun()
 
-
-# ============================================================================
-# Entrypoint
-# ============================================================================
 
 if "authenticated" not in st.session_state:
     st.session_state.authenticated = False
