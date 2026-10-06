@@ -3,10 +3,12 @@ import csv
 import html
 import importlib.util
 import io
+import json
 import logging
 import math
 import re
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -235,6 +237,9 @@ def inject_css():
         .stApp [data-testid="stChatInput"] button {background:#111827 !important;}
         .stApp [data-testid="stChatInput"] button svg {fill:#ffffff !important; color:#ffffff !important;}
         .stApp [data-testid="stBottom"], .stApp [data-testid="stBottom"] > div {background:#f5f7fb !important;}
+
+        /* Chart.js lives in an iframe; keep it visible, white and borderless */
+        .stApp iframe {border:0 !important; background:#ffffff !important; color-scheme:light;}
         </style>
         """,
         unsafe_allow_html=True,
@@ -837,209 +842,237 @@ def build_chart_spec(table: Dict[str, Any], viz: Dict[str, Any]) -> Optional[Dic
     }
 
 
-def nice_ticks(vmin: float, vmax: float, target: int = 5) -> Optional[List[float]]:
-    if not (math.isfinite(vmin) and math.isfinite(vmax)) or vmax <= vmin:
-        return None
-    raw = (vmax - vmin) / target
-    magnitude = 10 ** math.floor(math.log10(raw))
-    step = magnitude * 10
-    for multiplier in (1, 2, 2.5, 5, 10):
-        if raw <= multiplier * magnitude:
-            step = multiplier * magnitude
-            break
-    start = math.floor(vmin / step) * step
-    end = math.ceil(vmax / step) * step
-    count = min(int(round((end - start) / step)) + 1, 14)
-    return [round(start + i * step, 10) for i in range(count)]
+CHART_JS_VERSION = "4.4.1"
+CHART_JS_CDN_URLS = [
+    f"https://cdnjs.cloudflare.com/ajax/libs/Chart.js/{CHART_JS_VERSION}/chart.umd.min.js",
+    f"https://cdn.jsdelivr.net/npm/chart.js@{CHART_JS_VERSION}/dist/chart.umd.min.js",
+    f"https://unpkg.com/chart.js@{CHART_JS_VERSION}/dist/chart.umd.min.js",
+]
+# Optional: drop chart.umd.min.js into a "static" folder next to this file and it
+# is used first (fully offline). Otherwise it is downloaded once and cached here.
+CHART_JS_LOCAL_PATH = Path(__file__).resolve().parent / "static" / f"chart-{CHART_JS_VERSION}.umd.min.js"
+
+
+def _looks_like_chart_js(source: str) -> bool:
+    return len(source) > 50_000 and "Chart" in source and "</script" not in source.lower()
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def load_chart_js_source() -> str:
+    """Return the Chart.js library source so it can be inlined into the chart iframe.
+
+    The chart used to depend on the *browser* reaching a CDN from inside a
+    sandboxed iframe. When that request is blocked (firewall, proxy, CSP,
+    ad-blocker, offline network) Chart is undefined and the chart stays blank.
+    Inlining the library removes that dependency completely.
+    Order: local file -> download on the server (then saved locally) -> "" (the
+    iframe then falls back to loading from several CDNs in the browser).
+    """
+    try:
+        if CHART_JS_LOCAL_PATH.exists():
+            source = CHART_JS_LOCAL_PATH.read_text(encoding="utf-8")
+            if _looks_like_chart_js(source):
+                return source
+    except OSError as exc:
+        logger.warning("Could not read local Chart.js file: %s", exc)
+
+    for url in CHART_JS_CDN_URLS:
+        try:
+            response = httpx.get(url, timeout=20.0, follow_redirects=True)
+            response.raise_for_status()
+            source = response.text
+        except httpx.HTTPError as exc:
+            logger.warning("Chart.js download failed from %s: %s", url, exc)
+            continue
+        if not _looks_like_chart_js(source):
+            logger.warning("Chart.js download from %s did not look like the library", url)
+            continue
+        try:
+            CHART_JS_LOCAL_PATH.parent.mkdir(parents=True, exist_ok=True)
+            CHART_JS_LOCAL_PATH.write_text(source, encoding="utf-8")
+        except OSError as exc:
+            logger.warning("Could not cache Chart.js locally: %s", exc)
+        return source
+
+    logger.error("Chart.js could not be loaded on the server; the browser will try CDNs instead.")
+    return ""
+
+
+_CHART_TEMPLATE = r"""<!doctype html>
+<html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+html,body{margin:0;padding:0;background:#fff;font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#374151}
+.chart-wrap{width:100%;box-sizing:border-box;padding:8px 10px 2px;background:#fff}
+.title{font-size:14px;font-weight:650;color:#172033;margin:2px 0 10px}
+.canvas-wrap{position:relative;width:100%;height:340px}
+.canvas-wrap.horizontal{height:__HEIGHT__px}
+#error{display:none;padding:18px;color:#6b7280;font-size:13px}
+</style></head><body>
+<div class="chart-wrap"><div class="title">__TITLE__</div>
+<div class="canvas-wrap__CLASS__"><canvas id="chart"></canvas></div>
+<div id="error">Unable to render this chart.</div></div>
+__LIB__
+<script>
+const PAYLOAD = __DATA__;
+const CDN_URLS = __CDNS__;
+const COLORS = ['#2563eb','#f59e0b','#10b981','#ef4444','#8b5cf6'];
+function showError(message){
+ const box=document.getElementById('error');
+ box.textContent=message||'Unable to render this chart.';
+ box.style.display='block';
+}
+window.addEventListener('error',function(e){ if(!window.__chartDone){showError('Chart error: '+(e.message||'unknown'));} });
+function indian(value){
+ const n=Number(value); if(!Number.isFinite(n)) return String(value ?? '');
+ const sign=n<0?'-':''; const a=Math.abs(n); let text;
+ if(a>=10000000) text=(a/10000000).toFixed(2).replace(/\.?0+$/,'')+' Cr';
+ else if(a>=100000) text=(a/100000).toFixed(2).replace(/\.?0+$/,'')+' L';
+ else text=new Intl.NumberFormat('en-IN',{maximumFractionDigits:2}).format(a);
+ return sign+text;
+}
+function formatValue(value,kind){
+ if(value==null||value==='') return '—';
+ if(kind==='currency') return '₹'+indian(value);
+ if(kind==='percent'||kind==='percentage') return indian(value)+'%';
+ return indian(value);
+}
+function niceStep(range,target=5){
+ if(!(range>0)) return 1; const raw=range/target; const mag=Math.pow(10,Math.floor(Math.log10(raw))); const r=raw/mag;
+ let mult=10; if(r<=1)mult=1; else if(r<=2)mult=2; else if(r<=2.5)mult=2.5; else if(r<=5)mult=5; return mult*mag;
+}
+function render(){
+ const horizontal=PAYLOAD.horizontal;
+ const visible=PAYLOAD.datasets.filter(d=>!d.hidden);
+ const datasets=PAYLOAD.datasets.map((ds,i)=>{const color=COLORS[i%COLORS.length];return {
+  label:ds.label,data:ds.data,hidden:!!ds.hidden,borderColor:color,backgroundColor:color,
+  pointBackgroundColor:color,pointBorderColor:color,pointRadius:PAYLOAD.type==='line'?3.5:0,
+  pointHoverRadius:5,borderWidth:PAYLOAD.type==='line'?2:1,tension:.25,fill:false,borderRadius:PAYLOAD.type==='bar'?5:0,maxBarThickness:42
+ };});
+ const values=visible.flatMap(d=>d.data).filter(v=>v!==null&&v!==''&&Number.isFinite(Number(v))).map(Number);
+ let scale={grid:{color:'#eef0f3'},ticks:{color:'#6b7280',font:{size:11},callback:v=>indian(v)}};
+ if(values.length){
+  let lo=Math.min(0,...values),hi=Math.max(0,...values);
+  const step=niceStep(hi-lo||Math.abs(hi)||1);
+  scale.suggestedMin=Math.floor(lo/step)*step; scale.suggestedMax=Math.ceil(hi/step)*step;
+ }
+ const valueAxis=horizontal?'x':'y';
+ const config={type:PAYLOAD.type==='line'?'line':'bar',data:{labels:PAYLOAD.labels,datasets},options:{
+  indexAxis:horizontal?'y':'x',
+  responsive:true,maintainAspectRatio:false,animation:false,interaction:{mode:'index',intersect:false},
+  plugins:{legend:{display:PAYLOAD.datasets.length>1,position:'top',align:'start',labels:{usePointStyle:true,boxWidth:8,padding:16,color:'#374151',font:{size:11}}},
+   tooltip:{backgroundColor:'#111827',titleColor:'#fff',bodyColor:'#fff',padding:10,callbacks:{
+    label:ctx=>{const ds=PAYLOAD.datasets[ctx.datasetIndex];return ' '+ds.label+': '+formatValue(ctx.parsed[valueAxis],ds.kind);}
+   }}},
+  scales:horizontal
+   ?{x:{...scale,beginAtZero:true},y:{grid:{display:false},ticks:{color:'#374151',font:{size:11},autoSkip:false}}}
+   :{x:{grid:{display:false},ticks:{color:'#374151',font:{size:11},maxRotation:PAYLOAD.labels.length>10?45:0,minRotation:0,autoSkip:false}},y:{...scale,beginAtZero:true}}
+ }};
+ new Chart(document.getElementById('chart'),config);
+ window.__chartDone=true;
+}
+function safeRender(){
+ try{ render(); }catch(e){ showError('Chart error: '+(e&&e.message?e.message:e)); }
+}
+function loadFromCdn(i){
+ if(i>=CDN_URLS.length){ showError('Chart.js could not be loaded (the network may be blocking the chart library).'); return; }
+ const s=document.createElement('script');
+ s.src=CDN_URLS[i];
+ s.onload=function(){ if(typeof Chart!=='undefined'){ safeRender(); } else { loadFromCdn(i+1); } };
+ s.onerror=function(){ loadFromCdn(i+1); };
+ document.head.appendChild(s);
+}
+if(typeof Chart!=='undefined'){ safeRender(); } else { loadFromCdn(0); }
+</script></body></html>"""
+
+
+def _js_safe_json(value: Any) -> str:
+    """JSON that is safe to embed inside an inline <script> block."""
+    text = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    return (
+        text.replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+        .replace("&", "\\u0026")
+        .replace("\u2028", "\\u2028")
+        .replace("\u2029", "\\u2029")
+    )
 
 
 def _chart_js_html(spec: Dict[str, Any], title: str) -> str:
-    """Render the SAME chart specification previously sent to Plotly, using Chart.js.
+    """Render query-result data with Chart.js."""
+    payload = {
+        "title": title or "Visualization",
+        "type": spec.get("type", "bar"),
+        "labels": spec.get("labels", []),
+        "datasets": [
+            {"label": ds.get("label", "Value"), "data": ds.get("data", []),
+             "kind": ds.get("kind", "number"), "hidden": bool(ds.get("hidden"))}
+            for ds in spec.get("datasets", [])
+        ],
+        "horizontal": bool(spec.get("horizontal")),
+    }
+    chart_height = max(360, len(payload["labels"]) * 28 + 100) if payload["horizontal"] else 340
 
-    The data is not re-queried, guessed, sampled from arbitrary columns, or taken from
-    the Genie PNG. It is the exact query-result table already returned by Genie.
+    library = load_chart_js_source()
+    library_tag = f"<script>{library}</script>" if library else ""
+
+    values = {
+        "HEIGHT": str(chart_height),
+        "TITLE": html.escape(title or "Visualization"),
+        "CLASS": " horizontal" if payload["horizontal"] else "",
+        "LIB": library_tag,
+        "DATA": _js_safe_json(payload),
+        "CDNS": _js_safe_json(CHART_JS_CDN_URLS),
+    }
+    # Single pass so inserted content (library / data) is never re-scanned.
+    return re.sub(r"__(HEIGHT|TITLE|CLASS|LIB|DATA|CDNS)__", lambda m: values[m.group(1)], _CHART_TEMPLATE)
+
+
+def _show_chart_iframe(document: str, height: int):
+    """Embed the chart page. Newer Streamlit deprecates/removes st.components.v1.html
+    in favour of st.iframe, so prefer st.iframe and fall back for older versions."""
+    iframe = getattr(st, "iframe", None)
+    if callable(iframe):
+        try:
+            iframe(document, width="stretch", height=height)
+            return
+        except TypeError:
+            logger.info("st.iframe signature not supported; using components.html")
+    components.html(document, height=height, scrolling=False)
+
+
+def render_visualization(viz: Dict[str, Any], tables: List[Dict[str, Any]], conversation_id: str,
+                         message_id: str, key: str) -> bool:
+    """Render from the actual Genie query-result table using Chart.js only.
+
+    Returns True when the chart was rendered, so the caller knows whether the
+    plain table can be replaced by the chart or must still be shown.
     """
-    payload = json.dumps(spec, ensure_ascii=False, separators=(",", ":"))
-    safe_title = html.escape(title or "Visualization", quote=True)
-    height = 520 if spec.get("horizontal") else 400
-    return f"""
-<!doctype html>
-<html>
-<head>
-<meta charset="utf-8">
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
-<style>
-html, body {{ margin:0; padding:0; background:#fff; font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }}
-.chart-shell {{ width:100%; box-sizing:border-box; background:#fff; border:1px solid #e5e7eb; border-radius:12px; padding:18px 18px 12px; }}
-.chart-title {{ font-size:15px; font-weight:650; color:#172033; margin:0 0 12px; }}
-.chart-wrap {{ position:relative; width:100%; height:{height}px; }}
-.error {{ padding:18px; color:#b91c1c; font-size:13px; background:#fef2f2; border-radius:8px; }}
-</style>
-</head>
-<body>
-<div class="chart-shell">
-  <div class="chart-title">{safe_title}</div>
-  <div class="chart-wrap"><canvas id="tnsChart"></canvas></div>
-</div>
-<script>
-(function() {{
-  const spec = {payload};
-  const colors = ["#2563eb", "#f59e0b", "#10b981", "#ef4444", "#8b5cf6"];
-
-  function formatValue(value, kind) {{
-    if (value === null || value === undefined || Number.isNaN(Number(value))) return "—";
-    const n = Number(value);
-    if (kind === "percentage") return n.toLocaleString("en-IN", {{maximumFractionDigits:2}}) + "%";
-    if (kind === "currency") return "₹" + n.toLocaleString("en-IN", {{maximumFractionDigits:2}});
-    if (kind === "quantity") return n.toLocaleString("en-IN", {{maximumFractionDigits:2}});
-    return n.toLocaleString("en-IN", {{maximumFractionDigits:2}});
-  }}
-
-  function init() {{
-    if (typeof Chart === "undefined") {{
-      document.querySelector(".chart-shell").innerHTML =
-        '<div class="error">Chart.js could not be loaded. Please check the deployment network policy.</div>';
-      return;
-    }}
-
-    const horizontal = !!spec.horizontal;
-    const datasets = (spec.datasets || []).map((ds, i) => {{
-      const color = colors[i % colors.length];
-      return {{
-        label: ds.label,
-        data: ds.data,
-        hidden: !!ds.hidden,
-        backgroundColor: horizontal ? color : color,
-        borderColor: color,
-        borderWidth: 2,
-        pointBackgroundColor: color,
-        pointBorderColor: "#fff",
-        pointBorderWidth: 1.5,
-        pointRadius: spec.type === "line" ? 4 : 0,
-        pointHoverRadius: spec.type === "line" ? 6 : 0,
-        tension: 0.25,
-        fill: false,
-        borderRadius: spec.type === "bar" ? 4 : 0,
-        barPercentage: 0.72,
-        categoryPercentage: 0.72,
-      }};
-    }});
-
-    const valueScale = {{
-      beginAtZero: true,
-      grid: {{ color: "#eef0f3", drawBorder: false }},
-      border: {{ color: "#d1d5db" }},
-      ticks: {{
-        color: "#6b7280",
-        font: {{ size: 11 }},
-        callback: function(value) {{
-          return formatValue(value, spec.first_kind);
-        }}
-      }}
-    }};
-
-    const categoryScale = {{
-      grid: {{ display:false }},
-      border: {{ color: "#d1d5db" }},
-      ticks: {{
-        color: "#4b5563",
-        font: {{ size: 11 }},
-        autoSkip: false,
-        maxRotation: (spec.labels || []).length > 10 ? 45 : 0,
-        minRotation: (spec.labels || []).length > 10 ? 45 : 0,
-      }}
-    }};
-
-    const config = {{
-      type: spec.type === "line" ? "line" : "bar",
-      data: {{ labels: spec.labels || [], datasets }},
-      options: {{
-        responsive: true,
-        maintainAspectRatio: false,
-        interaction: {{ mode: "index", intersect: false }},
-        animation: {{ duration: 250 }},
-        plugins: {{
-          legend: {{
-            display: datasets.length > 1,
-            position: "top",
-            align: "start",
-            labels: {{ boxWidth: 12, boxHeight: 12, padding: 14, color: "#374151", font: {{ size: 11 }} }}
-          }},
-          tooltip: {{
-            backgroundColor: "#111827",
-            titleColor: "#fff",
-            bodyColor: "#fff",
-            padding: 10,
-            callbacks: {{
-              label: function(context) {{
-                const ds = context.dataset || {{}};
-                const value = context.parsed && context.parsed.y !== undefined
-                  ? context.parsed.y : context.parsed.x;
-                const index = context.datasetIndex || 0;
-                const kind = (spec.datasets[index] || {{}}).kind || spec.first_kind;
-                return " " + ds.label + ": " + formatValue(value, kind);
-              }}
-            }}
-          }}
-        }},
-        scales: horizontal ? {{
-          x: valueScale,
-          y: {{ ...categoryScale, ticks: {{ ...categoryScale.ticks, autoSkip:false }} }}
-        }} : {{
-          x: categoryScale,
-          y: valueScale
-        }}
-      }}
-    }};
-
-    new Chart(document.getElementById("tnsChart"), config);
-  }}
-
-  if (typeof Chart !== "undefined") init();
-  else setTimeout(init, 100);
-}})();
-</script>
-</body>
-</html>
-"""
-
-
-def render_visualization(
-    viz: Dict[str, Any],
-    tables: List[Dict[str, Any]],
-    conversation_id: str,
-    message_id: str,
-    key: str,
-):
-    """Render a chart from the actual Genie query-result table using Chart.js."""
     with st.container(border=True):
         title = viz.get("title") or "Visualization"
+        st.markdown(f"**{title}**")
         table = find_source_table(viz, tables)
         if not table:
-            st.warning("The analytical response did not include a query-result table for this chart.")
-            return
-
+            st.info("No query-result data is available for this visualization.")
+            return False
         try:
             spec = build_chart_spec(table, viz)
             if not spec:
-                st.warning("The returned query result does not contain a chartable dimension and metric.")
-                return
-
-            components.html(
-                _chart_js_html(spec, str(title)),
-                height=540 if spec.get("horizontal") else 430,
-                scrolling=False,
-            )
+                st.info("The query result does not contain enough data to render this chart.")
+                return False
+            frame_height = max(420, len(spec.get("labels", [])) * 28 + 145) if spec.get("horizontal") else 410
+            _show_chart_iframe(_chart_js_html(spec, title), frame_height)
             st.caption(f"Source: {table.get('title') or 'Query result'}")
             with st.expander("View data"):
                 render_table(table, conversation_id, message_id, f"{key}_data")
+            return True
         except Exception as exc:
-            logger.exception("Chart.js rendering failed: %s", exc)
-            st.error("The query result was returned, but the chart could not be rendered.")
+            logger.exception("Chart.js chart failed: %s", exc)
+            st.warning("The analytical result was returned, but the chart could not be rendered.")
+            return False
 
 
 # =====================================================================
-
 # Messages
 # =====================================================================
 
@@ -1085,11 +1118,11 @@ def source_title_map(tables: List[Dict[str, Any]], visualizations: List[Dict[str
 
 
 def render_assistant(content: str, presentation: Dict[str, Any], conversation_id: str,
-                     message_id: str, uid: str, show_suggestions: bool):
+                     message_id: str, uid: str, show_suggestions: bool, user_prompt: str = ""):
     thoughts, tables, visualizations, suggested = presentation_parts(presentation or {})
     titles = source_title_map(tables, visualizations)
 
-    # Same response order as the original web application.
+    # Layout mirrors the web UI: thought process, report, charts, tables, suggestions.
     render_thoughts(thoughts, uid)
     cited = render_answer(content, uid, titles)
 
@@ -1102,45 +1135,41 @@ def render_assistant(content: str, presentation: Dict[str, Any], conversation_id
         st.caption("Sources: " + " · ".join(sources))
 
     chart_sources = set()
-
-    # Normal Genie visualization objects: use their query_attachment_id to find
-    # the exact result table that produced the visualization.
     for index, viz in enumerate(visualizations):
-        render_visualization(viz, tables, conversation_id, message_id, f"{uid}_v{index}")
+        rendered = render_visualization(viz, tables, conversation_id, message_id, f"{uid}_v{index}")
         source = find_source_table(viz, tables)
-        if source:
+        # Only hide the plain table when the chart really rendered; otherwise
+        # the table below remains the fallback so no data is ever lost.
+        if rendered and source:
             chart_sources.add(source.get("attachment_id"))
 
-    # Genie may return the query-result table but no separate visualization
-    # attachment for prompts such as "give me the chart/plots". In that case
-    # reproduce the old Plotly behavior: build the chart directly from the
-    # returned table. Nothing is inferred from the answer text and no random
-    # numerical column is selected.
-    wants_chart = bool(re.search(
-        r"\b(chart|charts|plot|plots|graph|graphs|visuali[sz]ation|trend)\b",
-        str(content or ""),
+    # Genie can return the query-result table without attaching a separate
+    # visualization object. This is common for prompts such as
+    # "give me the chart/plots". In that case we deliberately build the
+    # Chart.js visualization from the SAME query-result data instead of
+    # waiting for a Genie viz attachment. This is the Streamlit equivalent
+    # of the old Plotly path.
+    if not visualizations and tables and re.search(
+        r"\b(chart|charts|plot|plots|graph|graphs|visual|visuals|visuali[sz]e|visuali[sz]ation|trend)\b",
+        f"{content or ''} {user_prompt or ''}",
         flags=re.IGNORECASE,
-    ))
-    if not visualizations and wants_chart:
+    ):
         synthetic_index = 0
         for table in tables:
-            attachment_id = table.get("attachment_id")
-            if attachment_id in chart_sources:
+            if table.get("attachment_id") in chart_sources:
                 continue
             synthetic_viz = {
                 "title": table.get("title") or "Visualization",
-                "query_attachment_id": attachment_id,
+                "query_attachment_id": table.get("attachment_id"),
             }
-            try:
-                if build_chart_spec(table, synthetic_viz):
-                    render_visualization(
-                        synthetic_viz, tables, conversation_id, message_id,
-                        f"{uid}_auto_v{synthetic_index}",
-                    )
-                    chart_sources.add(attachment_id)
-                    synthetic_index += 1
-            except Exception as exc:
-                logger.exception("Automatic Chart.js visualization failed: %s", exc)
+            if build_chart_spec(table, synthetic_viz) is None:
+                continue
+            if render_visualization(
+                synthetic_viz, tables, conversation_id, message_id,
+                f"{uid}_auto_v{synthetic_index}",
+            ):
+                chart_sources.add(table.get("attachment_id"))
+                synthetic_index += 1
 
     for index, table in enumerate(tables):
         if table.get("attachment_id") in chart_sources:
@@ -1155,7 +1184,8 @@ def render_assistant(content: str, presentation: Dict[str, Any], conversation_id
                 st.rerun()
 
 
-def render_message(message: Dict[str, Any], conversation_id: str, uid: str, is_last: bool):
+def render_message(message: Dict[str, Any], conversation_id: str, uid: str, is_last: bool,
+                   user_prompt: str = ""):
     role = message.get("role")
     content = message.get("content") or ""
     if role == "user":
@@ -1166,7 +1196,8 @@ def render_message(message: Dict[str, Any], conversation_id: str, uid: str, is_l
     presentation = message.get("presentation") or message.get("metadata") or {}
     message_id = presentation.get("agent_message_id") or message.get("message_id") or ""
     with st.chat_message("assistant"):
-        render_assistant(content, presentation, conversation_id, message_id, uid, show_suggestions=is_last)
+        render_assistant(content, presentation, conversation_id, message_id, uid,
+                         show_suggestions=is_last, user_prompt=user_prompt)
 
 
 # =====================================================================
@@ -1327,8 +1358,14 @@ def main_app():
     if history:
         conversation_id = store.get_conversation_id(active_id, st.session_state.username)
         messages = history["messages"]
+        last_user_prompt = ""
         for index, message in enumerate(messages):
-            render_message(message, conversation_id, f"{active_id}_{index}", is_last=(index == len(messages) - 1))
+            if message.get("role") == "user":
+                last_user_prompt = message.get("content") or ""
+            render_message(
+                message, conversation_id, f"{active_id}_{index}",
+                is_last=(index == len(messages) - 1), user_prompt=last_user_prompt,
+            )
     elif not prompt:
         st.markdown(
             '''<div class="welcome"><h1>How can I help you?</h1><p>Ask questions about company sales, products, stores, brands and more.</p></div>''',
