@@ -1176,7 +1176,10 @@ def render_assistant(content: str, presentation: Dict[str, Any], conversation_id
     # reproduce the old Plotly behavior: build the chart directly from the
     # returned table. Nothing is inferred from the answer text and no random
     # numerical column is selected.
-    wants_chart = bool(re.search(
+    # Prefer the explicit intent captured from the original user prompt.
+    # Fall back to the answer text for older persisted messages that do not
+    # contain chart_requested.
+    wants_chart = bool(presentation.get("chart_requested")) or bool(re.search(
         r"\b(chart|charts|plot|plots|graph|graphs|visuali[sz]ation|trend)\b",
         str(content or ""),
         flags=re.IGNORECASE,
@@ -1255,6 +1258,18 @@ async def run_agent_turn(client: GenieClient, message: str, conversation_id: Opt
 
     answer = client.normalize_answer_text(client.extract_agent_answer(response))
     presentation = await client.build_agent_presentation(response)
+
+    # Preserve the user's actual request as chart intent. The Agent can return
+    # a perfectly valid query-result table while omitting a separate
+    # visualization attachment and may also phrase its answer without the
+    # words "chart", "plot", or "trend". In that case the renderer still
+    # needs to know that the user explicitly requested a chart.
+    presentation["chart_requested"] = bool(re.search(
+        r"\b(chart|charts|plot|plots|graph|graphs|visuali[sz]ation|trend|graphical|visualize|visualise)\b",
+        str(message or ""),
+        flags=re.IGNORECASE,
+    ))
+
     message_id = presentation.get("agent_message_id") or response.get("id") or ""
     return {
         "answer": answer,
