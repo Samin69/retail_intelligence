@@ -1,11 +1,22 @@
 import asyncio
-import hashlib
+import csv
+import html
+import importlib.util
+import io
 import logging
-from typing import Any, Dict, Optional
+import math
+import re
+from datetime import datetime
+from typing import Any, Dict, List, Optional
 
 import httpx
 import pandas as pd
 import streamlit as st
+
+try:
+    import plotly.graph_objects as go
+except Exception:  # plotly not installed -> charts fall back to the Genie PNG
+    go = None
 
 from genie_client_streamlit import GenieClient, GenieError
 from streamlit_runtime import settings
@@ -19,9 +30,22 @@ st.set_page_config(
 )
 
 LOGO_URL = "https://admin.thenewshop.in/static/media/New%20Logo%20.ad69756dd0621a9db47a.jpg"
+CURRENCY_SYMBOL = "₹"
+CHART_COLORS = ["#2563eb", "#f59e0b", "#10b981", "#ef4444", "#8b5cf6"]
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("tns_streamlit")
 
+EXCEL_ENGINE = (
+    "xlsxwriter" if importlib.util.find_spec("xlsxwriter")
+    else "openpyxl" if importlib.util.find_spec("openpyxl")
+    else None
+)
+
+
+# =====================================================================
+# CSS
+# =====================================================================
 
 def inject_css():
     st.markdown(
@@ -31,97 +55,153 @@ def inject_css():
         footer {visibility:hidden;}
         header {background:transparent !important;}
         .stApp {background:#f5f7fb; color:#172033;}
+
+        /* ---------- layout ---------- */
+        [data-testid="stMainBlockContainer"], .block-container {
+            max-width: 980px !important;
+            padding-top: 1.2rem !important;
+            padding-bottom: 7rem !important;
+        }
+
+        /* ---------- sidebar ---------- */
         [data-testid="stSidebar"] {background:#111827; min-width:270px; max-width:270px;}
         [data-testid="stSidebar"] * {color:#d1d5db;}
-        [data-testid="stSidebar"] .stButton button {text-align:left; border:1px solid #374151; background:#1f2937; color:white; border-radius:9px;}
+        [data-testid="stSidebar"] .stButton button {
+            justify-content:flex-start; text-align:left;
+            border:1px solid #374151; background:#1f2937; color:white;
+            border-radius:9px; min-height:38px;
+        }
+        [data-testid="stSidebar"] .stButton button p {
+            overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:13px; color:#e5e7eb;
+        }
         [data-testid="stSidebar"] .stButton button:hover {background:#374151; border-color:#4b5563;}
+        [data-testid="stSidebar"] .stButton button[kind="primary"],
+        [data-testid="stSidebar"] .stButton button[data-testid="stBaseButton-primary"] {
+            background:#374151; border-color:#6b7280;
+        }
         .tns-brand {display:flex;align-items:center;gap:10px;padding:4px 0 18px;}
         .tns-brand img {width:38px;height:38px;border-radius:9px;object-fit:contain;background:white;}
-        .tns-brand-name {font-weight:650;font-size:16px;color:white;}
-        .tns-header {background:white;border-bottom:1px solid #e5e7eb;padding:12px 24px;margin:-1rem -1rem 1rem;}
-        .tns-header-title {font-weight:600;font-size:15px;color:#172033;}
+        .tns-brand-name {font-weight:650;font-size:16px;color:white !important;}
+        .section-label {font-size:11px;font-weight:650;text-transform:uppercase;letter-spacing:.7px;color:#9ca3af;margin:14px 0 7px;}
+
+        /* ---------- header / welcome ---------- */
+        .tns-header {border-bottom:1px solid #e5e7eb; padding:2px 0 14px; margin-bottom:20px;}
+        .tns-header-title {font-weight:600;font-size:16px;color:#172033;}
         .tns-header-subtitle {font-size:11px;color:#9ca3af;margin-top:2px;}
-        .welcome {text-align:center;margin:12vh auto 8vh;}
+        .welcome {text-align:center;margin:14vh auto 8vh;}
         .welcome h1 {font-size:30px;letter-spacing:-.5px;color:#172033;margin-bottom:10px;}
         .welcome p {font-size:14px;color:#6b7280;}
-        .user-bubble {background:#111827;color:white;border-radius:14px 14px 4px 14px;padding:13px 16px;line-height:1.55;margin:12px 0 18px 18%;}
-        .assistant-bubble {background:white;border:1px solid #e5e7eb;border-radius:14px 14px 14px 4px;padding:13px 16px;line-height:1.6;margin:12px 18% 18px 0;}
-        .section-label {font-size:11px;font-weight:650;text-transform:uppercase;letter-spacing:.7px;color:#9ca3af;margin:14px 0 7px;}
-        .result-card {border:1px solid #e5e7eb;border-radius:12px;background:white;padding:14px;margin:12px 0;}
-        .result-title {font-weight:650;color:#172033;margin-bottom:8px;}
-        .source-note {font-size:11px;color:#9ca3af;margin-top:7px;}
-        /* =====================================================
-           STREAMLIT LOGIN
-           ===================================================== */
+
+        /* ---------- chat bubbles ---------- */
+        [data-testid="stChatMessage"] {background:transparent; padding:0; gap:0; margin-bottom:16px;}
+        [data-testid^="stChatMessageAvatar"] {display:none !important;}
+        [data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarUser"]) {
+            background:#111827; border-radius:14px 14px 4px 14px;
+            padding:12px 16px; margin-left:20%;
+        }
+        [data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarUser"]) * {color:#ffffff !important;}
+        [data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarAssistant"]) {
+            background:#ffffff; border:1px solid #e5e7eb;
+            border-radius:14px 14px 14px 4px; padding:14px 18px; color:#1f2937;
+        }
+        [data-testid="stChatMessage"] h1 {font-size:20px; margin:14px 0 6px;}
+        [data-testid="stChatMessage"] h2 {font-size:17px; margin:14px 0 6px;}
+        [data-testid="stChatMessage"] h3 {font-size:15px; margin:14px 0 6px;}
+        [data-testid="stChatMessage"] h4 {font-size:14px; margin:12px 0 6px;}
+        [data-testid="stChatMessage"] p, [data-testid="stChatMessage"] li {font-size:14px; line-height:1.6;}
+        [data-testid="stChatMessage"] table {border-collapse:collapse; font-size:13px; margin:8px 0 10px;}
+        [data-testid="stChatMessage"] th, [data-testid="stChatMessage"] td {
+            border:1px solid #e5e7eb !important; padding:6px 10px !important; text-align:left;
+        }
+        [data-testid="stChatMessage"] th {background:#f9fafb !important; font-weight:700;}
+        [data-testid="stChatMessage"] sup {font-size:10px; color:#2563eb; font-weight:700; padding:0 1px;}
+
+        /* ---------- cards, buttons ---------- */
+        [data-testid="stChatMessage"] [data-testid="stVerticalBlockBorderWrapper"] {
+            border-radius:12px; background:#ffffff;
+        }
+        [data-testid="stMain"] .stButton button,
+        [data-testid="stMain"] .stDownloadButton button,
+        section.main .stButton button,
+        section.main .stDownloadButton button {
+            border:1px solid #d1d5db; background:#ffffff; color:#374151;
+            border-radius:999px; font-size:12px; padding:3px 12px; min-height:32px;
+        }
+        [data-testid="stMain"] .stButton button:hover,
+        [data-testid="stMain"] .stDownloadButton button:hover {background:#f1f5f9; border-color:#cbd5e1; color:#111827;}
+        [data-testid="stMain"] .stButton button p, [data-testid="stMain"] .stDownloadButton button p {font-size:12px;}
+
+        /* ---------- login ---------- */
         [data-testid="stForm"] {
-            max-width: 430px !important;
-            margin: 12vh auto 0 !important;
-            padding: 32px !important;
-            background: #ffffff !important;
-            border: 1px solid #e5e7eb !important;
-            border-radius: 16px !important;
-            box-shadow: 0 15px 40px rgba(0,0,0,.07) !important;
+            max-width:430px !important; margin:12vh auto 0 !important; padding:32px !important;
+            background:#ffffff !important; border:1px solid #e5e7eb !important;
+            border-radius:16px !important; box-shadow:0 15px 40px rgba(0,0,0,.07) !important;
         }
         [data-testid="stForm"] [data-testid="stTextInput"] label,
         [data-testid="stForm"] [data-testid="stTextInput"] label p {
-            color: #374151 !important;
-            font-size: 13px !important;
-            font-weight: 600 !important;
+            color:#374151 !important; font-size:13px !important; font-weight:600 !important;
         }
         [data-testid="stForm"] [data-testid="stTextInput"] input {
-            color: #111827 !important;
-            -webkit-text-fill-color: #111827 !important;
-            background: #ffffff !important;
-            border: 1px solid #d1d5db !important;
-            border-radius: 9px !important;
-        }
-        [data-testid="stForm"] [data-testid="stTextInput"] input::placeholder {
-            color: #9ca3af !important;
-            -webkit-text-fill-color: #9ca3af !important;
-            opacity: 1 !important;
+            color:#111827 !important; -webkit-text-fill-color:#111827 !important;
+            background:#ffffff !important; border:1px solid #d1d5db !important; border-radius:9px !important;
         }
         [data-testid="stForm"] button {
-            color: #ffffff !important;
-            -webkit-text-fill-color: #ffffff !important;
-            background: #111827 !important;
-            border: 1px solid #111827 !important;
-            border-radius: 9px !important;
-            font-weight: 600 !important;
+            color:#ffffff !important; -webkit-text-fill-color:#ffffff !important;
+            background:#111827 !important; border:1px solid #111827 !important;
+            border-radius:9px !important; font-weight:600 !important;
         }
         .login-logo {display:block;width:72px;height:72px;object-fit:contain;margin:0 auto 14px;border-radius:14px;background:#ffffff;border:1px solid #e5e7eb;box-shadow:0 2px 8px rgba(0,0,0,.06);}
         .login-title{text-align:center;font-size:24px;font-weight:700;color:#172033;margin:0 0 7px;}
         .login-sub{text-align:center;color:#6b7280;font-size:14px;margin:0 0 28px;}
         .login-heading {text-align:center;}
-        div[data-testid="stChatMessage"] {background:transparent;}
 
-        /* Keep Streamlit's native chat composer readable. */
-        [data-testid="stBottom"] { background:#f5f7fb !important; }
+        /* ---------- chat composer ---------- */
+        [data-testid="stBottom"], [data-testid="stBottom"] > div {background:#f5f7fb !important;}
         [data-testid="stChatInput"] {
-            background:#ffffff !important;
-            border:1px solid #d1d5db !important;
-            border-radius:14px !important;
-            box-shadow:0 4px 15px rgba(0,0,0,.05) !important;
+            background:#ffffff !important; border:1px solid #d1d5db !important;
+            border-radius:14px !important; box-shadow:0 4px 15px rgba(0,0,0,.05) !important;
         }
-        [data-testid="stChatInput"] textarea,
-        [data-testid="stChatInput"] input,
-        [data-testid="stChatInput"] textarea:focus,
-        [data-testid="stChatInput"] input:focus {
-            color:#111827 !important;
-            -webkit-text-fill-color:#111827 !important;
-            caret-color:#111827 !important;
-            background:#ffffff !important;
+        [data-testid="stChatInput"] textarea, [data-testid="stChatInput"] input,
+        [data-testid="stChatInput"] textarea:focus, [data-testid="stChatInput"] input:focus {
+            color:#111827 !important; -webkit-text-fill-color:#111827 !important;
+            caret-color:#111827 !important; background:#ffffff !important;
         }
-        [data-testid="stChatInput"] textarea::placeholder,
-        [data-testid="stChatInput"] input::placeholder {
-            color:#6b7280 !important;
-            -webkit-text-fill-color:#6b7280 !important;
-            opacity:1 !important;
+        [data-testid="stChatInput"] textarea::placeholder, [data-testid="stChatInput"] input::placeholder {
+            color:#6b7280 !important; -webkit-text-fill-color:#6b7280 !important; opacity:1 !important;
         }
         </style>
         """,
         unsafe_allow_html=True,
     )
 
+
+# =====================================================================
+# Streamlit version helpers
+# =====================================================================
+
+_WIDE_MODE: Dict[str, str] = {}
+
+
+def wide(fn, *args, **kwargs):
+    """Call a Streamlit element stretched to full width, on old and new versions."""
+    name = getattr(fn, "__name__", str(fn))
+    mode = _WIDE_MODE.get(name)
+    if mode is None:
+        try:
+            result = fn(*args, width="stretch", **kwargs)
+            _WIDE_MODE[name] = "stretch"
+            return result
+        except Exception:
+            _WIDE_MODE[name] = "legacy"
+            return fn(*args, use_container_width=True, **kwargs)
+    if mode == "stretch":
+        return fn(*args, width="stretch", **kwargs)
+    return fn(*args, use_container_width=True, **kwargs)
+
+
+# =====================================================================
+# Genie call plumbing (unchanged behaviour)
+# =====================================================================
 
 def run_async(coro):
     return asyncio.run(coro)
@@ -136,7 +216,6 @@ async def _call_genie(coro_factory):
     try:
         return await coro_factory(client)
     finally:
-        # Create, use, and close httpx.AsyncClient on the SAME event loop.
         await client.close()
 
 
@@ -145,7 +224,6 @@ def call_genie(coro_factory):
 
 
 def check_credentials(username: str, password: str) -> bool:
-    # Simple Streamlit-secret credentials as requested.
     return username == settings.app_username and password == settings.app_password
 
 
@@ -156,233 +234,796 @@ def ensure_store():
     st.session_state.store_initialized = True
 
 
-def login_screen():
-    inject_css()
-    with st.form("login_form"):
-        st.markdown(
-            f'''<div class="login-heading">
-                <img class="login-logo" src="{LOGO_URL}" />
-                <div class="login-title">TNS Retail Intelligence</div>
-                <div class="login-sub">Sign in to access company analytics</div>
-            </div>''',
-            unsafe_allow_html=True,
-        )
-        username = st.text_input("Username", autocomplete="username")
-        password = st.text_input("Password", type="password", autocomplete="current-password")
-        submitted = st.form_submit_button("Sign in", use_container_width=True)
-    if submitted:
-        if check_credentials(username.strip(), password):
-            st.session_state.authenticated = True
-            st.session_state.username = username.strip()
-            st.session_state.active_chat_id = None
-            st.rerun()
-        else:
-            st.error("Invalid username or password.")
+# =====================================================================
+# Number / cell formatting (Indian style, same rules as the web UI)
+# =====================================================================
+
+_NUMERIC_RE = re.compile(r"^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$")
 
 
-def get_sessions():
-    return store.list_sessions(st.session_state.username)
+def normalize_name(name: Any) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(name or "").lower())
 
 
-def load_history(session_id: str):
-    history = store.get_history(session_id, st.session_state.username)
-    if history is None:
-        st.error("Chat session not found.")
-        return None
-    return history
-
-
-def render_thoughts(thoughts):
-    if not thoughts:
-        return
-    with st.expander("Thought process", expanded=False):
-        for thought in thoughts:
-            content = thought.get("content") if isinstance(thought, dict) else str(thought)
-            if content:
-                st.markdown(content)
-
-
-def download_signed_links(table: Dict[str, Any], conversation_id: str, message_id: str):
-    attachment_id = table.get("attachment_id")
-    if not attachment_id or not message_id:
-        return
+def is_numeric_value(value: Any) -> bool:
+    if value is None or value == "":
+        return False
+    text = str(value).strip()
+    if not _NUMERIC_RE.match(text):
+        return False
     try:
-        links = call_genie(lambda client: client.get_full_query_download_links(conversation_id, message_id, attachment_id))
-        for index, link in enumerate(links):
-            try:
-                response = httpx.get(link, timeout=120.0)
-                response.raise_for_status()
-                label = "Download query result" if len(links) == 1 else f"Download query result {index + 1}"
-                st.download_button(
-                    label,
-                    data=response.content,
-                    file_name=f"genie_query_result_{index + 1}.csv",
-                    mime="text/csv",
-                    key=f"download_{conversation_id}_{message_id}_{attachment_id}_{index}",
-                )
-            except Exception as exc:
-                logger.warning("Could not download query result: %s", exc)
-                st.link_button(f"Open download {index + 1}", link)
-    except Exception as exc:
-        logger.warning("Could not create query-result download: %s", exc)
+        return math.isfinite(float(text))
+    except ValueError:
+        return False
 
 
-def render_table(table: Dict[str, Any], conversation_id: str, message_id: str):
+def is_quantity_column(name: Any) -> bool:
+    n = normalize_name(name)
+    words = ("quantity", "qty", "units", "unitcount", "itemcount", "productcount",
+             "skucount", "ordercount", "storecount", "customercount")
+    return any(w in n for w in words) or n.endswith("count")
+
+
+def is_percentage_column(name: Any) -> bool:
+    n = normalize_name(name)
+    return any(w in n for w in ("percent", "percentage", "rate", "margin")) or n.endswith("pct")
+
+
+def is_currency_column(name: Any) -> bool:
+    if is_quantity_column(name) or is_percentage_column(name):
+        return False
+    n = normalize_name(name)
+    words = ("revenue", "sales", "mrp", "amount", "price", "cost", "profit", "gmv",
+             "turnover", "discount", "deliveryfee", "taxamount", "netamount", "grossamount")
+    return any(w in n for w in words)
+
+
+def indian_format(value: float, min_dec: int = 0, max_dec: int = 2) -> str:
+    """Format a non-negative number with Indian digit grouping (12,34,567.89)."""
+    text = f"{abs(value):.{max_dec}f}"
+    int_part, _, dec = text.partition(".")
+    dec = dec.rstrip("0")
+    if len(dec) < min_dec:
+        dec = dec.ljust(min_dec, "0")
+    if len(int_part) > 3:
+        head, tail = int_part[:-3], int_part[-3:]
+        groups: List[str] = []
+        while len(head) > 2:
+            groups.insert(0, head[-2:])
+            head = head[:-2]
+        if head:
+            groups.insert(0, head)
+        int_part = ",".join(groups + [tail])
+    return int_part + (f".{dec}" if dec else "")
+
+
+def format_indian_currency(value: Any) -> str:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if not math.isfinite(number):
+        return str(value)
+    sign = "-" if number < 0 else ""
+    absolute = abs(number)
+    if absolute >= 10_000_000:
+        return f"{sign}{CURRENCY_SYMBOL}{indian_format(absolute / 10_000_000, 2, 2)} Cr"
+    if absolute >= 100_000:
+        return f"{sign}{CURRENCY_SYMBOL}{indian_format(absolute / 100_000, 2, 2)} L"
+    return f"{sign}{CURRENCY_SYMBOL}{indian_format(absolute, 0, 2)}"
+
+
+def format_plain_number(value: Any) -> str:
+    number = float(value)
+    return ("-" if number < 0 else "") + indian_format(number, 0, 2)
+
+
+def format_cell(value: Any, column: str = "") -> str:
+    if value is None or value == "":
+        return "—"
+    text = str(value).strip()
+    if not is_numeric_value(text):
+        return str(value)
+    if is_quantity_column(column):
+        return format_plain_number(text)
+    if is_percentage_column(column):
+        return f"{format_plain_number(text)}%"
+    if is_currency_column(column):
+        return format_indian_currency(text)
+    return format_plain_number(text)
+
+
+def column_kind(name: Any) -> str:
+    if is_currency_column(name):
+        return "currency"
+    if is_quantity_column(name):
+        return "quantity"
+    if is_percentage_column(name):
+        return "percent"
+    return "number"
+
+
+def format_chart_value(value: Any, kind: str) -> str:
+    if value is None:
+        return "—"
+    if kind == "currency":
+        return format_indian_currency(value)
+    formatted = format_plain_number(value)
+    return f"{formatted}%" if kind == "percent" else formatted
+
+
+def unique_columns(columns: List[str]) -> List[str]:
+    seen: Dict[str, int] = {}
+    result = []
+    for column in columns:
+        count = seen.get(column, 0)
+        seen[column] = count + 1
+        result.append(column if count == 0 else f"{column} ({count + 1})")
+    return result
+
+
+def normalize_rows(columns: List[str], rows: List[Any]) -> List[List[Any]]:
+    width = len(columns)
+    out = []
+    for row in rows:
+        row = list(row) if isinstance(row, (list, tuple)) else [row]
+        out.append((row + [None] * width)[:width])
+    return out
+
+
+# =====================================================================
+# Downloads (CSV / Excel / full CSV)
+# =====================================================================
+
+def file_safe_name(value: Any) -> str:
+    name = re.sub(r"[\\/:*?\"<>|]+", " ", str(value or "table"))
+    name = re.sub(r"\s+", "-", name).strip("-")[:80]
+    return name or "table"
+
+
+def csv_bytes(columns: List[str], rows: List[List[Any]]) -> bytes:
+    buffer = io.StringIO()
+    writer = csv.writer(buffer, lineterminator="\r\n")
+    writer.writerow(columns)
+    for row in rows:
+        writer.writerow(["" if v is None else v for v in row])
+    # BOM so Excel opens UTF-8 (₹ etc.) correctly.
+    return ("\ufeff" + buffer.getvalue()).encode("utf-8")
+
+
+def coerce_excel_cell(value: Any, allow_formatted: bool = False) -> Any:
+    if value is None or value == "":
+        return ""
+    candidate = str(value).strip()
+    if allow_formatted:
+        candidate = re.sub(r"^₹\s?", "", candidate).replace(",", "")
+    if (
+        is_numeric_value(candidate)
+        and not re.match(r"^[+-]?0\d", candidate)
+        and len(re.sub(r"\D", "", candidate)) <= 15
+    ):
+        return float(candidate)
+    return value
+
+
+@st.cache_data(show_spinner=False, max_entries=64)
+def excel_bytes(columns: tuple, rows: tuple, sheet_name: str, allow_formatted: bool) -> Optional[bytes]:
+    if EXCEL_ENGINE is None:
+        return None
+    cols = unique_columns(list(columns))
+    data = [[coerce_excel_cell(c, allow_formatted) for c in row] for row in rows]
+    frame = pd.DataFrame(data, columns=cols)
+    buffer = io.BytesIO()
+    safe_sheet = re.sub(r"[\\/?*\[\]:]", "", sheet_name)[:31] or "Sheet1"
+    with pd.ExcelWriter(buffer, engine=EXCEL_ENGINE) as writer:
+        frame.to_excel(writer, index=False, sheet_name=safe_sheet)
+    return buffer.getvalue()
+
+
+def csv_button(columns, rows, base_name, key):
+    wide(
+        st.download_button,
+        "⬇ CSV",
+        data=csv_bytes(columns, rows),
+        file_name=f"{base_name}.csv",
+        mime="text/csv",
+        key=f"csv_{key}",
+    )
+
+
+def excel_button(columns, rows, base_name, key, allow_formatted=False):
+    if EXCEL_ENGINE is None:
+        return
+    data = excel_bytes(tuple(columns), tuple(tuple(r) for r in rows), base_name, allow_formatted)
+    if not data:
+        return
+    wide(
+        st.download_button,
+        "⬇ Excel",
+        data=data,
+        file_name=f"{base_name}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key=f"xlsx_{key}",
+    )
+
+
+def fetch_full_csv(conversation_id: str, message_id: str, attachment_id: str) -> bytes:
+    links = call_genie(
+        lambda client: client.get_full_query_download_links(conversation_id, message_id, attachment_id)
+    )
+    parts: List[bytes] = []
+    for link in links:
+        response = httpx.get(link, timeout=300.0, follow_redirects=True)
+        response.raise_for_status()
+        parts.append(response.content)
+    if not parts:
+        raise GenieError("Databricks returned no download files.")
+
+    merged = parts[0].lstrip(b"\xef\xbb\xbf")
+    header = merged.split(b"\n", 1)[0].strip()
+    for extra in parts[1:]:
+        extra = extra.lstrip(b"\xef\xbb\xbf")
+        first = extra.split(b"\n", 1)[0].strip()
+        if first == header and b"\n" in extra:
+            extra = extra.split(b"\n", 1)[1]
+        if not merged.endswith(b"\n"):
+            merged += b"\n"
+        merged += extra
+    return b"\xef\xbb\xbf" + merged
+
+
+def full_csv_control(table: Dict[str, Any], conversation_id: str, message_id: str, key: str):
+    attachment_id = table.get("attachment_id")
+    if not attachment_id or not message_id or not conversation_id:
+        return
+    state_key = f"fullcsv_{key}"
+    data = st.session_state.get(state_key)
+    if data is not None:
+        wide(
+            st.download_button,
+            "⬇ Full CSV",
+            data=data,
+            file_name=f"{file_safe_name(table.get('title') or 'tns-result')}-full.csv",
+            mime="text/csv",
+            key=f"fullcsv_dl_{key}",
+        )
+        return
+    if wide(st.button, "Full CSV (all rows)", key=f"fullcsv_btn_{key}"):
+        try:
+            with st.spinner("Preparing full CSV…"):
+                st.session_state[state_key] = fetch_full_csv(conversation_id, message_id, attachment_id)
+            st.rerun()
+        except GenieError as exc:
+            st.warning(f"Unable to prepare the full CSV: {exc}")
+        except httpx.HTTPError as exc:
+            st.warning(f"Unable to download the full CSV: {exc}")
+
+
+# =====================================================================
+# Markdown preparation (citations, ₹, glued headings, tables)
+# =====================================================================
+
+_CITATION_RE = re.compile(
+    r"\[unrendered\s+:citation\[([^\]]+)\]\]|:citation\[([^\]]+)\](?:\{[^}]*\})?"
+)
+_OTHER_DIRECTIVE_RE = re.compile(r"\[unrendered\s+:[A-Za-z]+\[[^\]]*\]\]")
+_GLUED_HEADING_MARKER_RE = re.compile(r"([A-Za-z0-9)\.:\]])(#{2,6})[ \t]+(?=[A-Z])")
+_GLUED_HEADING_LINE_RE = re.compile(r"^(?:#{1,6}\s+)?((?:[A-Z][a-z]+ ){0,3}[A-Z][a-z]+)(?=[A-Z][a-z]+ [a-z])")
+_TABLE_SEPARATOR_RE = re.compile(r"^\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?$")
+
+
+def normalize_source_id(value: Any) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(value or "").lower())
+
+
+def prepare_text(text: str, source_titles: Optional[Dict[str, str]] = None):
+    """Return (markdown, cited_ids) ready for st.markdown(unsafe_allow_html=True)."""
+    source_titles = source_titles or {}
+    cited: List[str] = []
+
+    def citation(match: "re.Match[str]") -> str:
+        raw_id = match.group(1) or match.group(2) or ""
+        cid = re.sub(r"[^A-Za-z0-9_-]", "", raw_id.strip())
+        if not cid:
+            return ""
+        if cid not in cited:
+            cited.append(cid)
+        number = cited.index(cid) + 1
+        title = html.escape(source_titles.get(normalize_source_id(cid), ""), quote=True)
+        tip = f' title="{title}"' if title else ""
+        return f"<sup{tip}>[{number}]</sup>"
+
+    source = str(text or "")
+    source = source.replace("<", "&lt;")
+    source = _CITATION_RE.sub(citation, source)
+    source = _OTHER_DIRECTIVE_RE.sub("", source)
+    source = re.sub(r"\$(?=\s?\d)", CURRENCY_SYMBOL, source)
+    # Any remaining "$" would start LaTeX in Streamlit's markdown.
+    source = source.replace("$", "\\$")
+    source = _GLUED_HEADING_MARKER_RE.sub(r"\1\n\n\2 ", source)
+
+    lines: List[str] = []
+    for raw in source.split("\n"):
+        trimmed = raw.strip()
+        if len(trimmed) > 60 and not re.match(r"^[|\-*\d]", trimmed):
+            match = _GLUED_HEADING_LINE_RE.match(trimmed)
+            if match and len(match.group(1)) <= 45:
+                rest = trimmed[trimmed.index(match.group(1)) + len(match.group(1)):]
+                lines.extend([f"### {match.group(1)}", "", rest])
+                continue
+        lines.append(raw)
+    return "\n".join(lines), cited
+
+
+def split_table_row(row: str) -> List[str]:
+    row = row.strip()
+    row = row[1:] if row.startswith("|") else row
+    row = row[:-1] if row.endswith("|") else row
+    return [cell.strip() for cell in row.split("|")]
+
+
+def split_blocks(text: str) -> List[Dict[str, Any]]:
+    lines = text.split("\n")
+    blocks: List[Dict[str, Any]] = []
+    buffer: List[str] = []
+    i = 0
+    while i < len(lines):
+        line = lines[i].strip()
+        if line.startswith("|") and i + 1 < len(lines) and _TABLE_SEPARATOR_RE.match(lines[i + 1].strip()):
+            if buffer:
+                blocks.append({"type": "text", "text": "\n".join(buffer)})
+                buffer = []
+            raw = [lines[i], lines[i + 1]]
+            head = split_table_row(line)
+            body: List[List[str]] = []
+            i += 2
+            while i < len(lines) and lines[i].strip().startswith("|"):
+                raw.append(lines[i])
+                body.append(split_table_row(lines[i]))
+                i += 1
+            blocks.append({"type": "table", "raw": raw, "head": head, "body": body})
+            continue
+        buffer.append(lines[i])
+        i += 1
+    if buffer:
+        blocks.append({"type": "text", "text": "\n".join(buffer)})
+    return blocks
+
+
+def clean_cell(cell: str) -> str:
+    cell = re.sub(r"<[^>]+>", "", cell)
+    cell = re.sub(r"\[([^\]]+)\]\((?:https?://)[^)\s]+\)", r"\1", cell)
+    cell = cell.replace("**", "").replace("__", "").replace("`", "").replace("\\$", "$")
+    return html.unescape(cell).strip()
+
+
+def render_answer(content: str, uid: str, source_titles: Optional[Dict[str, str]] = None) -> List[str]:
+    text, cited = prepare_text(content, source_titles)
+    for index, block in enumerate(split_blocks(text)):
+        if block["type"] == "text":
+            if block["text"].strip():
+                st.markdown(block["text"], unsafe_allow_html=True)
+            continue
+
+        st.markdown("\n".join(block["raw"]), unsafe_allow_html=True)
+        columns = [clean_cell(c) for c in block["head"]]
+        rows = normalize_rows(columns, [[clean_cell(c) for c in row] for row in block["body"]])
+        base = f"tns-table-{index + 1}"
+        slots = st.columns([1, 1, 5] if EXCEL_ENGINE else [1, 6])
+        with slots[0]:
+            csv_button(columns, rows, base, f"{uid}_md{index}")
+        if EXCEL_ENGINE:
+            with slots[1]:
+                excel_button(columns, rows, base, f"{uid}_md{index}", allow_formatted=True)
+    return cited
+
+
+# =====================================================================
+# Tables
+# =====================================================================
+
+def render_table(table: Dict[str, Any], conversation_id: str, message_id: str, key: str):
+    columns = [str(c) for c in (table.get("columns") or [])]
+    rows = normalize_rows(columns, table.get("rows") or []) if columns else []
+    title = table.get("title") or "Query result"
+    base = file_safe_name(title)
+    displayed = table.get("displayed_row_count", len(rows))
+    total = int(table.get("row_count") or displayed or 0)
+    truncated = bool(table.get("truncated")) or total > displayed
+
     with st.container(border=True):
-        st.markdown(f"**{table.get('title') or 'Query result'}**")
+        st.markdown(f"**{title}**")
+        meta = f"{indian_format(total, 0, 0)} row(s)"
+        if truncated:
+            meta += f" · showing first {indian_format(displayed, 0, 0)}"
+        st.caption(meta)
         if table.get("description"):
             st.caption(table["description"])
-        columns = table.get("columns") or []
-        rows = table.get("rows") or []
-        if columns:
-            df = pd.DataFrame(rows, columns=columns)
-            st.dataframe(df, use_container_width=True, hide_index=True)
-        else:
+
+        if not columns:
             st.info(table.get("error") or "No tabular result was returned.")
-        displayed = table.get("displayed_row_count", len(rows))
-        total = table.get("row_count", displayed)
-        if table.get("truncated") or total > displayed:
-            st.caption(f"Showing {displayed:,} of {total:,} rows.")
-        download_signed_links(table, conversation_id, message_id)
+            return
+
+        slot_widths = [1, 1, 1.9, 1.3, 2.4]
+        slots = st.columns(slot_widths)
+        with slots[0]:
+            if rows:
+                csv_button(columns, rows, base, key)
+        with slots[1]:
+            if rows:
+                excel_button(columns, rows, base, key)
+        with slots[2]:
+            if truncated:
+                full_csv_control(table, conversation_id, message_id, key)
+        show_code = False
+        with slots[3]:
+            if table.get("query"):
+                show_code = st.toggle("Show code", key=f"code_{key}")
+
+        if show_code:
+            st.code(table["query"], language="sql")
+
+        frame = pd.DataFrame(
+            [[format_cell(v, c) for v, c in zip(row, columns)] for row in rows],
+            columns=unique_columns(columns),
+        )
+        height = int(min(440, 38 * (len(rows) + 1) + 3))
+        wide(st.dataframe, frame, hide_index=True, height=height)
+
+        if truncated:
+            st.caption("Only the first rows are shown here; use Full CSV for the complete TNS query result.")
+        if table.get("error"):
+            st.caption(str(table["error"]))
 
 
-def render_visualization(viz: Dict[str, Any], conversation_id: str, message_id: str):
+# =====================================================================
+# Charts
+# =====================================================================
+
+_SERIES_GROUPS = [
+    ["quantity", "qty", "units", "unit"],
+    ["revenue", "sales", "amount", "value"],
+    ["orders", "order", "transactions", "transaction", "invoices", "invoice", "bills"],
+]
+
+
+def _series_group(name: Any) -> int:
+    text = normalize_name(name)
+    for index, words in enumerate(_SERIES_GROUPS):
+        if any(w in text for w in words):
+            return index
+    return -1
+
+
+def is_iso_date(value: Any) -> bool:
+    return bool(re.match(r"^\d{4}-\d{2}-\d{2}([T ]|$)", str(value)))
+
+
+def format_chart_label(value: Any, monthly: bool) -> str:
+    if not is_iso_date(value):
+        return str(value)
+    try:
+        date = datetime.strptime(str(value)[:10], "%Y-%m-%d")
+    except ValueError:
+        return str(value)
+    return date.strftime("%b %Y") if monthly else f"{date.day} {date.strftime('%b %Y')}"
+
+
+def find_source_table(viz: Dict[str, Any], tables: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    for attachment_id in (viz.get("query_attachment_id"), viz.get("attachment_id")):
+        if not attachment_id:
+            continue
+        for table in tables:
+            if table.get("attachment_id") == attachment_id:
+                return table
+    return tables[-1] if tables else None
+
+
+def build_chart_spec(table: Dict[str, Any], viz: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    columns = [str(c) for c in (table.get("columns") or [])]
+    rows = normalize_rows(columns, (table.get("rows") or [])[:50]) if columns else []
+    if len(columns) < 2 or not rows:
+        return None
+
+    numeric_columns = []
+    for c in range(1, len(columns)):
+        values = [row[c] for row in rows if row[c] not in (None, "")]
+        if values and all(is_numeric_value(v) for v in values):
+            numeric_columns.append(c)
+    if not numeric_columns:
+        return None
+
+    date_axis = all(is_iso_date(row[0]) for row in rows)
+    monthly = date_axis and all(re.match(r"^\d{4}-\d{2}-01", str(row[0])) for row in rows)
+    hint = " ".join(str(viz.get(k) or "") for k in ("chart_type", "type", "title")).lower()
+    chart_type = "line" if (date_axis or re.search(r"line|trend", hint)) else "bar"
+
+    title_text = str(viz.get("title") or "").lower()
+    title_groups = [
+        group
+        for group, words in enumerate(_SERIES_GROUPS)
+        if any(re.search(rf"\b{w}s?\b", title_text) for w in words)
+    ]
+    preferred = [c for c in numeric_columns if _series_group(columns[c]) in title_groups]
+    if not preferred:
+        first_kind = column_kind(columns[numeric_columns[0]])
+        preferred = [c for c in numeric_columns if column_kind(columns[c]) == first_kind]
+
+    preferred_set = set(preferred)
+    first_kind = column_kind(columns[preferred[0]])
+    ordered = preferred + [c for c in numeric_columns if c not in preferred_set]
+
+    datasets = [
+        {
+            "label": columns[c],
+            "kind": column_kind(columns[c]),
+            "hidden": c not in preferred_set,
+            "data": [float(row[c]) if is_numeric_value(row[c]) else None for row in rows],
+        }
+        for c in ordered[:5]
+    ]
+    return {
+        "type": chart_type,
+        "labels": [format_chart_label(row[0], monthly) for row in rows],
+        "datasets": datasets,
+        "first_kind": first_kind,
+        "horizontal": chart_type == "bar" and len(rows) > 12,
+    }
+
+
+def nice_ticks(vmin: float, vmax: float, target: int = 5) -> Optional[List[float]]:
+    if not (math.isfinite(vmin) and math.isfinite(vmax)) or vmax <= vmin:
+        return None
+    raw = (vmax - vmin) / target
+    magnitude = 10 ** math.floor(math.log10(raw))
+    step = magnitude * 10
+    for multiplier in (1, 2, 2.5, 5, 10):
+        if raw <= multiplier * magnitude:
+            step = multiplier * magnitude
+            break
+    start = math.floor(vmin / step) * step
+    end = math.ceil(vmax / step) * step
+    count = min(int(round((end - start) / step)) + 1, 14)
+    return [round(start + i * step, 10) for i in range(count)]
+
+
+def build_figure(spec: Dict[str, Any]):
+    horizontal = spec["horizontal"]
+    labels = spec["labels"]
+    fig = go.Figure()
+
+    for index, dataset in enumerate(spec["datasets"]):
+        color = CHART_COLORS[index % len(CHART_COLORS)]
+        hover = [
+            f"{label}<br>{dataset['label']}: {format_chart_value(value, dataset['kind'])}"
+            for label, value in zip(labels, dataset["data"])
+        ]
+        common = dict(
+            name=dataset["label"],
+            visible="legendonly" if dataset["hidden"] else True,
+            hovertext=hover,
+            hovertemplate="%{hovertext}<extra></extra>",
+        )
+        if spec["type"] == "line":
+            fig.add_trace(go.Scatter(
+                x=labels, y=dataset["data"], mode="lines+markers",
+                line=dict(color=color, width=2), marker=dict(color=color, size=6),
+                connectgaps=False, **common,
+            ))
+        elif horizontal:
+            fig.add_trace(go.Bar(y=labels, x=dataset["data"], orientation="h",
+                                 marker_color=color, **common))
+        else:
+            fig.add_trace(go.Bar(x=labels, y=dataset["data"], marker_color=color, **common))
+
+    visible_values = [
+        v for ds in spec["datasets"] if not ds["hidden"] for v in ds["data"] if v is not None
+    ]
+    value_axis: Dict[str, Any] = dict(gridcolor="#eef0f3", zeroline=True, zerolinecolor="#d1d5db")
+    if visible_values:
+        ticks = nice_ticks(min(0.0, min(visible_values)), max(0.0, max(visible_values)))
+        if ticks:
+            value_axis.update(
+                tickvals=ticks,
+                ticktext=[format_chart_value(t, spec["first_kind"]) for t in ticks],
+            )
+    category_axis: Dict[str, Any] = dict(
+        type="category", categoryorder="array", categoryarray=labels,
+        automargin=True, showgrid=False,
+    )
+
+    height = max(340, len(labels) * 24 + 90) if horizontal else 340
+    fig.update_layout(
+        template="plotly_white",
+        height=height,
+        margin=dict(l=10, r=10, t=30, b=10),
+        paper_bgcolor="#ffffff",
+        plot_bgcolor="#ffffff",
+        showlegend=len(spec["datasets"]) > 1,
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+        barmode="group",
+        bargap=0.25,
+        font=dict(family="Inter, -apple-system, Segoe UI, sans-serif", size=12, color="#374151"),
+        hoverlabel=dict(bgcolor="#111827", font_color="#ffffff"),
+    )
+    if horizontal:
+        fig.update_xaxes(**value_axis)
+        fig.update_yaxes(autorange="reversed", **category_axis)
+    else:
+        fig.update_yaxes(**value_axis)
+        fig.update_xaxes(tickangle=-45 if len(labels) > 10 else 0, **category_axis)
+    return fig
+
+
+@st.cache_data(show_spinner=False, ttl=3600, max_entries=32)
+def fetch_visualization_png(conversation_id: str, message_id: str, attachment_id: str) -> bytes:
+    return call_genie(
+        lambda client: client.download_visualization(conversation_id, message_id, attachment_id)
+    )
+
+
+def render_visualization(
+    viz: Dict[str, Any],
+    tables: List[Dict[str, Any]],
+    conversation_id: str,
+    message_id: str,
+    key: str,
+):
     with st.container(border=True):
         st.markdown(f"**{viz.get('title') or 'Visualization'}**")
+        table = find_source_table(viz, tables)
+
+        if go is not None and table:
+            try:
+                spec = build_chart_spec(table, viz)
+                if spec:
+                    figure = build_figure(spec)
+                    wide(st.plotly_chart, figure, key=f"chart_{key}", config={"displaylogo": False})
+                    st.caption(f"Source: {table.get('title') or 'Query result'}")
+                    with st.expander("View data"):
+                        render_table(table, conversation_id, message_id, f"{key}_data")
+                    return
+            except Exception as exc:
+                logger.warning("Native chart failed, using TNS image: %s", exc)
+
         attachment_id = viz.get("attachment_id")
         if not attachment_id or not message_id:
+            st.info("This visualization is not available.")
             return
         try:
-            image = call_genie(lambda client: client.download_visualization(conversation_id, message_id, attachment_id))
-            st.image(image, use_container_width=True)
+            image = fetch_visualization_png(conversation_id, message_id, attachment_id)
+            wide(st.image, image)
             st.download_button(
-                "Download chart",
+                "⬇ Chart (PNG)",
                 data=image,
-                file_name="genie_visualization.png",
+                file_name="TNS_visualization.png",
                 mime="image/png",
-                key=f"viz_download_{conversation_id}_{message_id}_{attachment_id}",
+                key=f"viz_dl_{key}",
             )
         except Exception as exc:
             logger.warning("Visualization retrieval failed: %s", exc)
             st.warning("The analytical response was returned, but this visualization could not be loaded.")
 
 
-def render_presentation(presentation: Dict[str, Any], conversation_id: str, message_id: str):
-    """Render the same ordered Agent presentation structure as the working web UI."""
-    if not presentation:
-        return
+# =====================================================================
+# Messages
+# =====================================================================
 
+def render_thoughts(thoughts: List[Any], uid: str):
+    if not thoughts:
+        return
+    with st.expander("Thought process", expanded=False):
+        number = 0
+        for thought in thoughts:
+            content = thought.get("content") if isinstance(thought, dict) else str(thought)
+            if not content:
+                continue
+            number += 1
+            text, _ = prepare_text(content)
+            st.markdown(f"**{number}.** {text}", unsafe_allow_html=True)
+
+
+def presentation_parts(presentation: Dict[str, Any]):
     blocks = presentation.get("blocks") or []
 
-    # Agent mode: preserve the exact block order returned by Genie.
-    # This is important: the working web app renders thoughts/tables/charts/
-    # suggestions in the order supplied by the Agent, rather than grouping them
-    # by type.
-    if blocks:
-        rendered_table_attachments = set()
-        chart_source_ids = {
-            (block.get("data") or {}).get("query_attachment_id")
-            for block in blocks
-            if block.get("type") == "visualization"
-            and (block.get("data") or {}).get("query_attachment_id")
-        }
+    def from_blocks(block_type: str) -> List[Any]:
+        return [b.get("data") for b in blocks if b.get("type") == block_type and b.get("data") is not None]
 
-        for index, block in enumerate(blocks):
-            block_type = block.get("type")
-            data = block.get("data") or {}
+    thoughts = presentation.get("thoughts") or (from_blocks("thoughts") or [[]])[0]
+    tables = presentation.get("tables") or from_blocks("table")
+    visualizations = presentation.get("visualizations") or from_blocks("visualization")
+    suggested = presentation.get("suggested_questions") or (from_blocks("suggested_questions") or [[]])[0]
+    return thoughts, tables, visualizations, suggested
 
-            if block_type == "thoughts":
-                render_thoughts(data)
-            elif block_type == "visualization":
-                render_visualization(data, conversation_id, message_id)
-            elif block_type == "table":
-                attachment_id = data.get("attachment_id")
-                if attachment_id in chart_source_ids:
-                    continue
-                if attachment_id and attachment_id in rendered_table_attachments:
-                    continue
-                if attachment_id:
-                    rendered_table_attachments.add(attachment_id)
-                render_table(data, conversation_id, message_id)
-            elif block_type == "suggested_questions":
-                suggestions = data if isinstance(data, list) else []
-                if suggestions:
-                    st.markdown('<div class="section-label">Suggested questions</div>', unsafe_allow_html=True)
-                    for suggestion_index, question in enumerate(suggestions):
-                        if st.button(
-                            question,
-                            key=f"suggestion_{message_id}_{index}_{suggestion_index}",
-                            use_container_width=True,
-                        ):
-                            st.session_state.pending_prompt = question
-                            st.rerun()
-        return
 
-    # Backward-compatible rendering for messages saved in the older
-    # presentation format.
-    thoughts = presentation.get("thoughts") or []
-    if thoughts:
-        render_thoughts(thoughts)
-
-    visualizations = presentation.get("visualizations") or []
+def source_title_map(tables: List[Dict[str, Any]], visualizations: List[Dict[str, Any]]) -> Dict[str, str]:
+    titles: Dict[str, str] = {}
+    for table in tables:
+        if table.get("attachment_id"):
+            titles[normalize_source_id(table["attachment_id"])] = table.get("title") or "Query result"
     for viz in visualizations:
-        render_visualization(viz, conversation_id, message_id)
+        source = find_source_table(viz, tables)
+        label = (source or {}).get("title") or viz.get("title") or "Visualization"
+        for field in ("attachment_id", "query_attachment_id"):
+            if viz.get(field):
+                titles.setdefault(normalize_source_id(viz[field]), label)
+    return titles
 
-    chart_source_ids = {
-        v.get("query_attachment_id") for v in visualizations if v.get("query_attachment_id")
-    }
-    for table in presentation.get("tables") or []:
-        if table.get("attachment_id") in chart_source_ids:
+
+def render_assistant(content: str, presentation: Dict[str, Any], conversation_id: str,
+                     message_id: str, uid: str, show_suggestions: bool):
+    thoughts, tables, visualizations, suggested = presentation_parts(presentation or {})
+    titles = source_title_map(tables, visualizations)
+
+    # Layout mirrors the web UI: thought process, report, charts, tables, suggestions.
+    render_thoughts(thoughts, uid)
+    cited = render_answer(content, uid, titles)
+
+    sources = [
+        f"[{number}] {titles[normalize_source_id(cid)]}"
+        for number, cid in enumerate(cited, start=1)
+        if normalize_source_id(cid) in titles
+    ]
+    if sources:
+        st.caption("Sources: " + " · ".join(sources))
+
+    chart_sources = set()
+    for index, viz in enumerate(visualizations):
+        render_visualization(viz, tables, conversation_id, message_id, f"{uid}_v{index}")
+        source = find_source_table(viz, tables)
+        if source:
+            chart_sources.add(source.get("attachment_id"))
+
+    for index, table in enumerate(tables):
+        if table.get("attachment_id") in chart_sources:
             continue
-        render_table(table, conversation_id, message_id)
+        render_table(table, conversation_id, message_id, f"{uid}_t{index}")
 
-    suggestions = presentation.get("suggested_questions") or []
-    if suggestions:
+    if suggested and show_suggestions:
         st.markdown('<div class="section-label">Suggested questions</div>', unsafe_allow_html=True)
-        for index, question in enumerate(suggestions):
-            if st.button(question, key=f"suggestion_{message_id}_{index}", use_container_width=True):
+        for index, question in enumerate(suggested):
+            if wide(st.button, question, key=f"suggestion_{uid}_{index}"):
                 st.session_state.pending_prompt = question
                 st.rerun()
 
 
-def render_message(message: Dict[str, Any], conversation_id: str):
+def render_message(message: Dict[str, Any], conversation_id: str, uid: str, is_last: bool):
     role = message.get("role")
     content = message.get("content") or ""
     if role == "user":
-        st.markdown(f'<div class="user-bubble">{content.replace(chr(10), "<br>")}</div>', unsafe_allow_html=True)
+        with st.chat_message("user"):
+            st.markdown(content.replace("$", "\\$"))
         return
 
-    st.markdown("<div class='assistant-bubble'>", unsafe_allow_html=True)
     presentation = message.get("presentation") or message.get("metadata") or {}
     message_id = presentation.get("agent_message_id") or message.get("message_id") or ""
+    with st.chat_message("assistant"):
+        render_assistant(content, presentation, conversation_id, message_id, uid, show_suggestions=is_last)
 
-    # Match the working web app: Agent-mode rich blocks are rendered BEFORE
-    # the final answer; legacy Chat-mode rich blocks remain AFTER the answer.
-    if presentation.get("mode") == "agent":
-        render_presentation(presentation, conversation_id, message_id)
-        st.markdown(content)
-    else:
-        st.markdown(content)
-        render_presentation(presentation, conversation_id, message_id)
 
-    st.markdown("</div>", unsafe_allow_html=True)
-
+# =====================================================================
+# Turn processing
+# =====================================================================
 
 async def run_agent_turn(client: GenieClient, message: str, conversation_id: Optional[str]):
     original = conversation_id
     rebound = False
     try:
-        response = await client.create_agent_response(message, conversation_id=conversation_id, enable_visualization=True)
+        response = await client.create_agent_response(
+            message, conversation_id=conversation_id, enable_visualization=True
+        )
     except GenieError as exc:
         if conversation_id and client.is_legacy_conversation_error(exc):
             rebound = True
-            response = await client.create_agent_response(message, conversation_id=None, enable_visualization=True)
+            response = await client.create_agent_response(
+                message, conversation_id=None, enable_visualization=True
+            )
         else:
             raise
 
     resolved = response.get("conversation_id") or (None if rebound else conversation_id)
     if not resolved:
-        raise GenieError("Genie Agent did not return a conversation ID.")
+        raise GenieError("TNS Agent did not return a conversation ID.")
 
     answer = client.normalize_answer_text(client.extract_agent_answer(response))
     presentation = await client.build_agent_presentation(response)
@@ -420,23 +1061,67 @@ def process_followup(session_id: str, prompt: str):
     return result
 
 
+# =====================================================================
+# Screens
+# =====================================================================
+
+def login_screen():
+    inject_css()
+    with st.form("login_form"):
+        st.markdown(
+            f'''<div class="login-heading">
+                <img class="login-logo" src="{LOGO_URL}" />
+                <div class="login-title">TNS Retail Intelligence</div>
+                <div class="login-sub">Sign in to access company analytics</div>
+            </div>''',
+            unsafe_allow_html=True,
+        )
+        username = st.text_input("Username", autocomplete="username")
+        password = st.text_input("Password", type="password", autocomplete="current-password")
+        submitted = wide(st.form_submit_button, "Sign in")
+    if submitted:
+        if check_credentials(username.strip(), password):
+            st.session_state.authenticated = True
+            st.session_state.username = username.strip()
+            st.session_state.active_chat_id = None
+            st.rerun()
+        else:
+            st.error("Invalid username or password.")
+
+
+def load_history(session_id: str):
+    history = store.get_history(session_id, st.session_state.username)
+    if history is None:
+        st.error("Chat session not found.")
+        return None
+    return history
+
+
 def render_sidebar():
     with st.sidebar:
         st.markdown(
             f'<div class="tns-brand"><img src="{LOGO_URL}"/><div class="tns-brand-name">TNS Retail Intelligence</div></div>',
             unsafe_allow_html=True,
         )
-        if st.button("＋  New Chat", use_container_width=True):
+        if wide(st.button, "＋  New Chat", key="new_chat"):
             st.session_state.active_chat_id = None
             st.session_state.pending_prompt = ""
             st.rerun()
         st.markdown('<div class="section-label">Conversations</div>', unsafe_allow_html=True)
-        sessions = get_sessions()
+        sessions = store.list_sessions(st.session_state.username)
+        if not sessions:
+            st.caption("No conversations yet.")
+        active = st.session_state.get("active_chat_id")
         for session in sessions:
             label = session["title"] or "New Chat"
-            c1, c2 = st.columns([0.86, 0.14], gap="small")
+            c1, c2 = st.columns([0.84, 0.16], gap="small")
             with c1:
-                if st.button(label, key=f"chat_{session['session_id']}", use_container_width=True):
+                is_active = session["session_id"] == active
+                if wide(
+                    st.button, label,
+                    key=f"chat_{session['session_id']}",
+                    type="primary" if is_active else "secondary",
+                ):
                     st.session_state.active_chat_id = session["session_id"]
                     st.session_state.pending_prompt = ""
                     st.rerun()
@@ -447,8 +1132,8 @@ def render_sidebar():
                         st.session_state.active_chat_id = None
                     st.rerun()
         st.divider()
-        st.caption(st.session_state.username)
-        if st.button("Logout", use_container_width=True):
+        st.caption(f"Signed in as {st.session_state.username}")
+        if wide(st.button, "Logout", key="logout"):
             st.session_state.clear()
             st.rerun()
 
@@ -459,39 +1144,46 @@ def main_app():
     render_sidebar()
 
     active_id = st.session_state.get("active_chat_id")
+    pending = st.session_state.pop("pending_prompt", "")
+    typed = st.chat_input("Ask a question...", max_chars=5000)
+    prompt = pending or typed
+
     history = load_history(active_id) if active_id else None
     title = history["title"] if history else "New Chat"
 
     st.markdown(
-        f'''<div class="tns-header"><div class="tns-header-title">{title}</div><div class="tns-header-subtitle">Business Intelligence Assistant</div></div>''',
+        f'''<div class="tns-header"><div class="tns-header-title">{html.escape(title)}</div><div class="tns-header-subtitle">Business Intelligence Assistant</div></div>''',
         unsafe_allow_html=True,
     )
 
     if history:
         conversation_id = store.get_conversation_id(active_id, st.session_state.username)
-        for message in history["messages"]:
-            render_message(message, conversation_id)
-    else:
+        messages = history["messages"]
+        for index, message in enumerate(messages):
+            render_message(message, conversation_id, f"{active_id}_{index}", is_last=(index == len(messages) - 1))
+    elif not prompt:
         st.markdown(
             '''<div class="welcome"><h1>How can I help you?</h1><p>Ask questions about company sales, products, stores, brands and more.</p></div>''',
             unsafe_allow_html=True,
         )
-    pending = st.session_state.pop("pending_prompt", "")
-    prompt = st.chat_input("Ask a question...", max_chars=5000)
-    if pending:
-        prompt = pending
 
     if prompt:
-        with st.spinner("Genie is analyzing your request..."):
-            try:
-                if active_id:
-                    result = process_followup(active_id, prompt)
-                else:
-                    result = process_new_message(prompt)
-                st.rerun()
-            except Exception as exc:
-                logger.exception("Genie request failed")
-                st.error(f"Request failed: {exc}")
+        with st.chat_message("user"):
+            st.markdown(prompt.replace("$", "\\$"))
+        succeeded = False
+        with st.chat_message("assistant"):
+            with st.spinner("TNS is analyzing your request..."):
+                try:
+                    if active_id:
+                        process_followup(active_id, prompt)
+                    else:
+                        process_new_message(prompt)
+                    succeeded = True
+                except Exception as exc:
+                    logger.exception("TNS request failed")
+                    st.error(f"Request failed: {exc}")
+        if succeeded:
+            st.rerun()
 
 
 if "authenticated" not in st.session_state:
