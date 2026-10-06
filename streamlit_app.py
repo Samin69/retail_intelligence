@@ -665,10 +665,9 @@ def build_altair_chart(
     base = alt.Chart(df).properties(
         title=alt.TitleParams(
             text=title,
-            subtitle=description if description else None,
             anchor="start",
             fontSize=17,
-            subtitleFontSize=12,
+            **({"subtitle": description, "subtitleFontSize": 12} if description else {}),
         ),
         height=max(340, min(650, 80 + len(df) * 24)) if chart_type == "bar" and len(df) > 12 else 360,
     )
@@ -718,7 +717,7 @@ def build_altair_chart(
         chart = alt.layer(*layers).resolve_scale(y="shared").properties(
             title=alt.TitleParams(
                 text=title,
-                subtitle=description if description else None,
+                subtitle=description or "",
                 anchor="start",
                 fontSize=17,
                 subtitleFontSize=12,
@@ -788,10 +787,9 @@ def build_altair_chart(
     chart = chart.properties(
         title=alt.TitleParams(
             text=title,
-            subtitle=description if description else None,
             anchor="start",
             fontSize=17,
-            subtitleFontSize=12,
+            **({"subtitle": description, "subtitleFontSize": 12} if description else {}),
         ),
         height=max(340, min(650, 80 + len(df) * 24)) if horizontal else 360,
     ).interactive()
