@@ -648,6 +648,39 @@ class GenieClient:
         payload = response.json()
         return list(payload.get("messages") or [])
 
+    async def get_agent_message(
+        self,
+        conversation_id: str,
+        message_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Fetch one exact Agent message by message_id.
+
+        This is intentionally preferred over selecting a message from the
+        conversation list. The list can contain many completed messages, and
+        selecting the wrong one can pair the current answer with an older
+        visualization attachment.
+        """
+        url = (
+            f"{self.host}/api/2.0/genie/spaces/"
+            f"{self.agent_id}/conversations/{conversation_id}/messages/{message_id}"
+        )
+        response = await self._request("GET", url)
+        return response.json()
+
+    @staticmethod
+    def _response_message_id(response: Dict[str, Any]) -> Optional[str]:
+        """Return the assistant message id emitted by Agent mode, if present."""
+        for item in reversed(response.get("output") or []):
+            if not isinstance(item, dict) or item.get("type") != "message":
+                continue
+            if item.get("role") != "assistant":
+                continue
+            for key in ("message_id", "id"):
+                value = item.get(key)
+                if value:
+                    return str(value)
+        return None
+
     @staticmethod
     def _message_time(message: Dict[str, Any]) -> Optional[float]:
         """Best-effort creation time of a Genie message, in seconds."""
@@ -713,24 +746,43 @@ class GenieClient:
     async def get_latest_agent_message(
         self,
         conversation_id: str,
+        expected_message_id: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
-        """Find the newest assistant message of an Agent conversation.
+        """Fetch the exact Agent message for this response.
 
-        The attachment projection can lag slightly behind the SSE stream,
-        so wait briefly while the newest message is not yet COMPLETED.
+        Agent-mode SSE identifies the assistant output item. When that item
+        exposes a message id, use the single-message endpoint instead of
+        guessing which completed message is newest. This is critical for
+        visualization attachments because each message has its own query and
+        visualization attachment IDs.
         """
         message: Optional[Dict[str, Any]] = None
 
-        # The message can become COMPLETED slightly before its visualization
-        # attachment is exposed by the Conversation API. Keep polling briefly
-        # so native Genie charts are not mistaken for missing visualizations.
-        for attempt in range(8):
-            messages = await self.get_agent_messages(conversation_id)
-            self._dump_debug("messages", conversation_id, messages)
+        for attempt in range(10):
+            if expected_message_id:
+                try:
+                    message = await self.get_agent_message(
+                        conversation_id, expected_message_id
+                    )
+                except GenieError as exc:
+                    # A just-created message can briefly be unavailable from
+                    # the projection endpoint. Fall back to the list endpoint
+                    # while it propagates.
+                    logger.debug(
+                        "Exact Genie message lookup attempt %d failed: %s",
+                        attempt + 1,
+                        exc,
+                    )
+                    message = None
 
-            message = self._pick_latest_message(messages)
             if message is None:
-                return None
+                messages = await self.get_agent_messages(conversation_id)
+                self._dump_debug("messages", conversation_id, messages)
+                message = self._pick_latest_message(messages)
+
+            if message is None:
+                await asyncio.sleep(0.75)
+                continue
 
             status = str(message.get("status", "")).upper()
             attachments = message.get("attachments") or []
@@ -744,20 +796,18 @@ class GenieClient:
             if status == "COMPLETED" and has_viz:
                 break
 
-            # If there is no visualization, do not make the user wait through
-            # the entire retry window. One extra poll handles the common
-            # projection lag while keeping text/table-only answers fast.
-            if status == "COMPLETED" and attempt >= 1 and not has_viz:
+            if status == "COMPLETED" and attempt >= 2 and not has_viz:
                 break
 
             await asyncio.sleep(0.75)
 
         if message is not None:
             logger.info(
-                "Using Genie message %s (status=%s, attachments=%d)",
+                "Using Genie message %s (status=%s, attachments=%d, expected=%s)",
                 message.get("message_id") or message.get("id"),
                 message.get("status"),
                 len(message.get("attachments") or []),
+                expected_message_id or "none",
             )
 
         return message
@@ -801,8 +851,10 @@ class GenieClient:
         # exposed there and can be downloaded with the standard Genie endpoint.
         if conversation_id:
             try:
+                expected_message_id = self._response_message_id(response)
                 agent_message = await self.get_latest_agent_message(
-                    conversation_id
+                    conversation_id,
+                    expected_message_id=expected_message_id,
                 )
             except GenieError as exc:
                 logger.warning(
@@ -863,13 +915,41 @@ class GenieClient:
                         # and using it with /download-visualization can return a
                         # rendered table instead of the actual Genie chart.
                         viz_attachment_id = viz.get("attachment_id")
+                        viz_query_attachment_id = viz.get("query_attachment_id")
+
+                        # A valid Genie visualization is a separate attachment
+                        # whose query_attachment_id points to the query attachment
+                        # that produced it. Never treat the parent query attachment
+                        # itself as a visualization.
+                        if not viz_attachment_id:
+                            continue
+                        if attachment_id and viz_attachment_id == attachment_id:
+                            logger.warning(
+                                "Ignoring invalid Genie viz attachment %s: it is "
+                                "the same as the query attachment %s.",
+                                viz_attachment_id,
+                                attachment_id,
+                            )
+                            continue
+                        if (
+                            viz_query_attachment_id
+                            and attachment_id
+                            and viz_query_attachment_id != attachment_id
+                        ):
+                            logger.warning(
+                                "Ignoring mismatched Genie viz attachment %s: "
+                                "query_attachment_id=%s, parent_attachment_id=%s.",
+                                viz_attachment_id,
+                                viz_query_attachment_id,
+                                attachment_id,
+                            )
+                            continue
+
                         if viz_attachment_id:
                             visualization = {
                                 "title": viz.get("title") or "Visualization",
                                 "attachment_id": viz_attachment_id,
-                                "query_attachment_id": viz.get(
-                                    "query_attachment_id"
-                                ),
+                                "query_attachment_id": viz_query_attachment_id,
                                 "image_url": (
                                     f"/api/genie/visualizations/"
                                     f"{conversation_id}/{agent_message_id}/"
