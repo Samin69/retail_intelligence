@@ -17,11 +17,7 @@ from typing import Any, Dict, List, Optional
 import httpx
 import pandas as pd
 import streamlit as st
-
-try:
-    import plotly.graph_objects as go
-except Exception:  # plotly not installed -> charts fall back to the Genie PNG
-    go = None
+import streamlit.components.v1 as components
 
 from genie_client_streamlit import GenieClient, GenieError
 from streamlit_runtime import settings
@@ -830,24 +826,13 @@ def format_chart_label(value: Any, monthly: bool) -> str:
 
 
 def find_source_table(viz: Dict[str, Any], tables: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    # A Genie visualization explicitly identifies the query attachment that
-    # produced it. Never guess from the last table: that can silently draw an
-    # unrelated chart or make a valid visualization appear to be missing.
-    source_id = viz.get("query_attachment_id")
-    if source_id:
-        source_norm = normalize_source_id(source_id)
+    ids=[viz.get("query_attachment_id"),viz.get("attachment_id")]
+    ids=[normalize_source_id(v) for v in ids if v]
+    for source_id in ids:
         for table in tables:
-            if normalize_source_id(table.get("attachment_id")) == source_norm:
+            if normalize_source_id(table.get("attachment_id"))==source_id:
                 return table
-    # Some Genie responses omit query_attachment_id but still use the same
-    # attachment id for a visualization. Only use that exact match.
-    viz_id = viz.get("attachment_id")
-    if viz_id:
-        viz_norm = normalize_source_id(viz_id)
-        for table in tables:
-            if normalize_source_id(table.get("attachment_id")) == viz_norm:
-                return table
-    return None
+    return tables[-1] if tables else None
 
 
 def build_chart_spec(table: Dict[str, Any], viz: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -902,154 +887,118 @@ def build_chart_spec(table: Dict[str, Any], viz: Dict[str, Any]) -> Optional[Dic
     }
 
 
-def nice_ticks(vmin: float, vmax: float, target: int = 5) -> Optional[List[float]]:
-    if not (math.isfinite(vmin) and math.isfinite(vmax)) or vmax <= vmin:
-        return None
-    raw = (vmax - vmin) / target
-    magnitude = 10 ** math.floor(math.log10(raw))
-    step = magnitude * 10
-    for multiplier in (1, 2, 2.5, 5, 10):
-        if raw <= multiplier * magnitude:
-            step = multiplier * magnitude
-            break
-    start = math.floor(vmin / step) * step
-    end = math.ceil(vmax / step) * step
-    count = min(int(round((end - start) / step)) + 1, 14)
-    return [round(start + i * step, 10) for i in range(count)]
+def build_fastapi_chart_html(spec: Dict[str, Any], title: str, source_title: str) -> str:
+    """Render the same Chart.js chart used by the FastAPI index.html."""
+    import json as _json
+
+    height = max(340, len(spec["labels"]) * 24 + 90) if spec["horizontal"] else 340
+    spec_json = _json.dumps({
+        "type": spec["type"], "labels": spec["labels"],
+        "datasets": spec["datasets"], "horizontal": spec["horizontal"],
+        "first_kind": spec["first_kind"],
+    }, ensure_ascii=False)
+    title_json = _json.dumps(title or "Visualization", ensure_ascii=False)
+    source_json = _json.dumps(source_title or "Query result", ensure_ascii=False)
+
+    html_doc = '''<!doctype html>
+<html><head><meta charset="utf-8">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+* { box-sizing:border-box; }
+html,body { margin:0; padding:0; background:#fff; font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+.card { width:100%; overflow:hidden; border:1px solid #e5e7eb; border-radius:12px; background:#fff; }
+.header { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:11px 13px; border-bottom:1px solid #eef0f3; }
+.title { font-size:13px; font-weight:700; color:#111827; }
+.body { position:relative; width:100%; height:__HEIGHT__px; padding:12px 14px 4px; background:#fff; }
+.source { padding:4px 14px 10px; color:#6b7280; font-size:11px; }
+.error { padding:16px; color:#b42318; font-size:13px; }
+canvas { width:100% !important; height:100% !important; }
+</style></head>
+<body><div class="card">
+<div class="header"><div class="title" id="title"></div></div>
+<div class="body"><canvas id="chart"></canvas></div>
+<div class="source" id="source"></div>
+</div>
+<script>
+const spec=__SPEC__;
+const title=__TITLE__;
+const source=__SOURCE__;
+const CHART_COLORS=["#2563eb","#f59e0b","#10b981","#ef4444","#8b5cf6"];
+function formatIndianCurrency(value) {
+ const number=Number(value); if(!Number.isFinite(number)) return String(value);
+ const absolute=Math.abs(number), sign=number<0?"-":"";
+ if(absolute>=10000000) return `${sign}₹${(absolute/10000000).toLocaleString("en-IN",{minimumFractionDigits:2,maximumFractionDigits:2})} Cr`;
+ if(absolute>=100000) return `${sign}₹${(absolute/100000).toLocaleString("en-IN",{minimumFractionDigits:2,maximumFractionDigits:2})} L`;
+ return `${sign}₹${absolute.toLocaleString("en-IN",{minimumFractionDigits:0,maximumFractionDigits:2})}`;
+}
+function formatChartValue(value,kind) {
+ if(value===null||value===undefined) return "—";
+ if(kind==="currency") return formatIndianCurrency(value);
+ const formatted=Number(value).toLocaleString("en-IN",{maximumFractionDigits:2});
+ return kind==="percent"?`${formatted}%`:formatted;
+}
+document.getElementById("title").textContent=title;
+document.getElementById("source").textContent=`Source: ${source}`;
+try {
+ const valueScale={beginAtZero:true,ticks:{callback:(value)=>formatChartValue(value,spec.first_kind)}};
+ new Chart(document.getElementById("chart"),{
+  type:spec.type,
+  data:{labels:spec.labels,datasets:spec.datasets.map((dataset,index)=>({
+   label:dataset.label,data:dataset.data,hidden:dataset.hidden,
+   backgroundColor:CHART_COLORS[index%CHART_COLORS.length],
+   borderColor:CHART_COLORS[index%CHART_COLORS.length],
+   borderWidth:spec.type==="line"?2:0,borderRadius:spec.type==="bar"?3:0,
+   pointRadius:spec.type==="line"?3:0,tension:0.25,spanGaps:false
+  }))},
+  options:{responsive:true,maintainAspectRatio:false,indexAxis:spec.horizontal?"y":"x",
+   plugins:{legend:{display:spec.datasets.length>1},tooltip:{callbacks:{label:(context)=>{
+    const value=spec.horizontal?context.parsed.x:context.parsed.y;
+    const kind=spec.datasets[context.datasetIndex].kind;
+    return `${context.dataset.label}: ${formatChartValue(value,kind)}`;
+   }}}},
+   scales:spec.horizontal?{x:valueScale,y:{ticks:{autoSkip:false}}}:{y:valueScale,x:{ticks:{maxRotation:60,autoSkip:spec.labels.length>24}}}
+  }
+ });
+} catch(error) { document.querySelector(".body").innerHTML=`<div class="error">Could not render the chart: ${error}</div>`; }
+</script></body></html>'''
+    return (html_doc.replace("__HEIGHT__", str(height))
+        .replace("__SPEC__", spec_json).replace("__TITLE__", title_json).replace("__SOURCE__", source_json))
 
 
-def build_figure(spec: Dict[str, Any]):
-    horizontal = spec["horizontal"]
-    labels = spec["labels"]
-    fig = go.Figure()
-
-    for index, dataset in enumerate(spec["datasets"]):
-        color = CHART_COLORS[index % len(CHART_COLORS)]
-        hover = [
-            f"{label}<br>{dataset['label']}: {format_chart_value(value, dataset['kind'])}"
-            for label, value in zip(labels, dataset["data"])
-        ]
-        common = dict(
-            name=dataset["label"],
-            visible="legendonly" if dataset["hidden"] else True,
-            hovertext=hover,
-            hovertemplate="%{hovertext}<extra></extra>",
-        )
-        if spec["type"] == "line":
-            fig.add_trace(go.Scatter(
-                x=labels, y=dataset["data"], mode="lines+markers",
-                line=dict(color=color, width=2), marker=dict(color=color, size=6),
-                connectgaps=False, **common,
-            ))
-        elif horizontal:
-            fig.add_trace(go.Bar(y=labels, x=dataset["data"], orientation="h",
-                                 marker_color=color, **common))
-        else:
-            fig.add_trace(go.Bar(x=labels, y=dataset["data"], marker_color=color, **common))
-
-    visible_values = [
-        v for ds in spec["datasets"] if not ds["hidden"] for v in ds["data"] if v is not None
-    ]
-    value_axis: Dict[str, Any] = dict(gridcolor="#eef0f3", zeroline=True, zerolinecolor="#d1d5db")
-    if visible_values:
-        ticks = nice_ticks(min(0.0, min(visible_values)), max(0.0, max(visible_values)))
-        if ticks:
-            value_axis.update(
-                tickvals=ticks,
-                ticktext=[format_chart_value(t, spec["first_kind"]) for t in ticks],
-            )
-    category_axis: Dict[str, Any] = dict(
-        type="category", categoryorder="array", categoryarray=labels,
-        automargin=True, showgrid=False,
-    )
-
-    height = max(340, len(labels) * 24 + 90) if horizontal else 340
-    fig.update_layout(
-        template="plotly_white",
-        height=height,
-        margin=dict(l=10, r=10, t=30, b=10),
-        paper_bgcolor="#ffffff",
-        plot_bgcolor="#ffffff",
-        showlegend=len(spec["datasets"]) > 1,
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
-        barmode="group",
-        bargap=0.25,
-        font=dict(family="Inter, -apple-system, Segoe UI, sans-serif", size=12, color="#374151"),
-        hoverlabel=dict(bgcolor="#111827", font_color="#ffffff"),
-    )
-    if horizontal:
-        fig.update_xaxes(**value_axis)
-        fig.update_yaxes(autorange="reversed", **category_axis)
-    else:
-        fig.update_yaxes(**value_axis)
-        fig.update_xaxes(tickangle=-45 if len(labels) > 10 else 0, **category_axis)
-    return fig
-
-
-@st.cache_data(show_spinner=False, ttl=3600, max_entries=32)
-def fetch_visualization_png(conversation_id: str, message_id: str, attachment_id: str) -> bytes:
-    return call_genie(
-        lambda client: client.download_visualization(conversation_id, message_id, attachment_id)
-    )
-
-
-def render_visualization(
-    viz: Dict[str, Any],
-    tables: List[Dict[str, Any]],
-    conversation_id: str,
-    message_id: str,
-    key: str,
-):
-    with st.container(border=True):
-        st.markdown(f"**{viz.get('title') or 'Visualization'}**")
-        table = find_source_table(viz, tables)
-
+def render_visualization(viz: Dict[str, Any], tables: List[Dict[str, Any]], conversation_id: str, message_id: str, key: str):
+    """The Streamlit equivalent of FastAPI's renderVisualization()."""
+    with st.container():
+        table=find_source_table(viz,tables)
+        rendered=False
         if table:
             try:
-                spec = build_chart_spec(table, viz)
+                spec=build_chart_spec(table,viz)
                 if spec:
-                    if go is not None:
-                        figure = build_figure(spec)
-                        wide(st.plotly_chart, figure, key=f"chart_{key}", config={"displaylogo": False})
-                    else:
-                        # Plotly is optional. Keep charts functional even if
-                        # a deployment omitted the Plotly package.
-                        frame = pd.DataFrame({
-                            "Category": spec["labels"],
-                            **{ds["label"]: ds["data"] for ds in spec["datasets"] if not ds["hidden"]},
-                        }).set_index("Category")
-                        if spec["type"] == "line":
-                            wide(st.line_chart, frame, height=360)
-                        else:
-                            wide(st.bar_chart, frame, height=max(360, len(frame) * 28 if spec["horizontal"] else 360))
-                    st.caption(f"Source: {table.get('title') or 'Query result'}")
+                    chart_height=max(340,len(spec["labels"])*24+90) if spec["horizontal"] else 340
+                    components.html(
+                        build_fastapi_chart_html(spec,viz.get("title") or "Visualization",table.get("title") or "Query result"),
+                        height=chart_height+92,
+                        scrolling=False,
+                    )
+                    rendered=True
                     with st.expander("View data"):
-                        render_table(table, conversation_id, message_id, f"{key}_data")
-                    return
+                        render_table(table,conversation_id,message_id,f"{key}_data")
             except Exception as exc:
-                logger.exception("Query-result chart rendering failed: %s", exc)
-                st.warning(f"Could not render the chart from the Genie query result: {exc}")
+                logger.exception("Native Chart.js rendering failed: %s",exc)
+                st.warning(f"Native chart rendering failed: {exc}")
 
-        # Only use the Databricks PNG when there is no usable query result.
-        # It is a true fallback, never the primary chart renderer.
-
-        attachment_id = viz.get("attachment_id")
-        if not attachment_id or not message_id:
-            st.info("This visualization is not available.")
-            return
-        try:
-            image = fetch_visualization_png(conversation_id, message_id, attachment_id)
-            wide(st.image, image)
-            st.download_button(
-                "⬇ Chart (PNG)",
-                data=image,
-                file_name="TNS_visualization.png",
-                mime="image/png",
-                key=f"viz_dl_{key}",
-            )
-        except Exception as exc:
-            logger.warning("Visualization retrieval failed: %s", exc)
-            st.warning("The analytical response was returned, but this visualization could not be loaded.")
+        if not rendered and viz.get("image_url"):
+            attachment_id=viz.get("attachment_id")
+            if not attachment_id or not message_id:
+                st.info("This visualization is not available.")
+                return
+            try:
+                image=fetch_visualization_png(conversation_id,message_id,attachment_id)
+                wide(st.image,image)
+                st.download_button("⬇ Chart (PNG)",data=image,file_name="TNS_visualization.png",mime="image/png",key=f"viz_dl_{key}")
+            except Exception as exc:
+                logger.warning("Visualization retrieval failed: %s",exc)
+                st.warning("The analytical response was returned, but this visualization could not be loaded.")
 
 
 # =====================================================================
