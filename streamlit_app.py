@@ -459,6 +459,35 @@ def format_chart_value(value: Any, kind: str) -> str:
     return f"{formatted}%" if kind == "percent" else formatted
 
 
+def format_compact_chart_value(value: Any, kind: str) -> str:
+    """Compact chart labels/ticks so scales stay readable at a glance."""
+    if value is None:
+        return "—"
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+
+    sign = "-" if number < 0 else ""
+    number = abs(number)
+    if kind == "percent":
+        return f"{sign}{number:,.0f}%"
+
+    if number >= 1_000_000:
+        text = f"{number / 1_000_000:.1f}M"
+    elif number >= 1_000:
+        text = f"{number / 1_000:.1f}K"
+    elif number >= 100:
+        text = f"{number:,.0f}"
+    elif number >= 10:
+        text = f"{number:,.1f}".rstrip("0").rstrip(".")
+    else:
+        text = f"{number:,.2f}".rstrip("0").rstrip(".")
+
+    prefix = "₹" if kind == "currency" else ""
+    return f"{sign}{prefix}{text}"
+
+
 def unique_columns(columns: List[str]) -> List[str]:
     seen: Dict[str, int] = {}
     result = []
@@ -864,7 +893,10 @@ def build_chart_spec(table: Dict[str, Any], viz: Dict[str, Any]) -> Optional[Dic
         {
             "label": columns[c],
             "kind": column_kind(columns[c]),
-            "hidden": c not in preferred_set,
+            # All Genie result series are visible by default. Users can still
+            # toggle individual series from the legend, but no data is hidden
+            # on first render.
+            "hidden": False,
             "data": [numeric_value(row[c]) for row in rows],
         }
         for c in ordered[:5]
@@ -919,17 +951,29 @@ def build_figure(spec: Dict[str, Any]):
                 connectgaps=False, **common,
             ))
         elif horizontal:
+            # Put labels just outside the bars. This avoids the dense,
+            # overlapping text produced by Plotly's automatic placement on
+            # grouped horizontal bars. The axis range is padded below so the
+            # labels have room to breathe.
             fig.add_trace(go.Bar(
                 y=labels, x=dataset["data"], orientation="h",
                 marker=dict(color=color, line=dict(width=0)),
-                text=[format_chart_value(v, dataset["kind"]) for v in dataset["data"]],
-                textposition="auto", textfont=dict(color="#172033", size=11),
-                cliponaxis=False, **common,
+                text=[format_compact_chart_value(v, dataset["kind"]) for v in dataset["data"]],
+                textposition="outside",
+                textfont=dict(color="#172033", size=10),
+                cliponaxis=False,
+                constraintext="none",
+                **common,
             ))
         else:
             fig.add_trace(go.Bar(
                 x=labels, y=dataset["data"],
                 marker=dict(color=color, line=dict(width=0)),
+                text=[format_compact_chart_value(v, dataset["kind"]) for v in dataset["data"]],
+                textposition="outside",
+                textfont=dict(color="#172033", size=10),
+                cliponaxis=False,
+                constraintext="none",
                 **common,
             ))
 
@@ -947,7 +991,9 @@ def build_figure(spec: Dict[str, Any]):
         if ticks:
             value_axis.update(
                 tickvals=ticks,
-                ticktext=[format_chart_value(t, spec["first_kind"]) for t in ticks],
+                ticktext=[format_compact_chart_value(t, spec["first_kind"]) for t in ticks],
+                tickangle=0,
+                nticks=min(7, len(ticks)),
             )
 
     category_axis: Dict[str, Any] = dict(
@@ -987,6 +1033,15 @@ def build_figure(spec: Dict[str, Any]):
         hoverlabel=dict(bgcolor="#111827", font_color="#ffffff", font_size=12),
     )
     if horizontal:
+        # Reserve a little room for outside data labels. Keep zero as the
+        # baseline for business charts while preventing labels from being
+        # clipped at the right edge.
+        if visible_values:
+            positive_max = max(visible_values)
+            negative_min = min(visible_values)
+            span = max(abs(positive_max), abs(negative_min), 1.0)
+            pad = span * 0.12
+            value_axis["range"] = [min(0.0, negative_min) - pad * 0.15, positive_max + pad]
         fig.update_xaxes(**value_axis)
         fig.update_yaxes(autorange="reversed", **category_axis)
     else:
