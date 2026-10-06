@@ -48,451 +48,197 @@ EXCEL_ENGINE = (
 # =====================================================================
 
 def inject_css():
-    """Visual-only styling. No application, Genie, data, or rendering logic is changed here."""
     st.markdown(
         """
         <style>
-        /* ================================================================
-           TNS RETAIL INTELLIGENCE — UI ONLY
-           Keep all application behavior untouched. This section controls
-           spacing, alignment, typography, colors and Streamlit chrome.
-           ================================================================ */
-        #MainMenu, footer {visibility:hidden;}
+        #MainMenu {visibility:hidden;}
+        footer {visibility:hidden;}
         header {background:transparent !important;}
-        .stApp {
-            background:#f5f7fb !important;
-            color:#172033 !important;
-            color-scheme:light !important;
-        }
+        .stApp {background:#f5f7fb; color:#172033;}
 
-        /* ---------- main page geometry ---------- */
-        [data-testid="stMainBlockContainer"],
-        .block-container {
-            width:100% !important;
-            max-width:1120px !important;
-            padding-top:20px !important;
-            padding-left:28px !important;
-            padding-right:28px !important;
-            padding-bottom:110px !important;
+        /* ---------- layout ---------- */
+        [data-testid="stMainBlockContainer"], .block-container {
+            max-width: 980px !important;
+            padding-top: 1.2rem !important;
+            padding-bottom: 7rem !important;
         }
-        [data-testid="stMain"] {background:#f5f7fb !important;}
-        section.main {background:#f5f7fb !important;}
 
         /* ---------- sidebar ---------- */
-        [data-testid="stSidebar"] {
-            background:#101827 !important;
-            min-width:300px !important;
-            max-width:300px !important;
-            border-right:1px solid #1f2937 !important;
-        }
-        [data-testid="stSidebar"] > div:first-child {padding:22px 18px 18px !important;}
-        [data-testid="stSidebar"] * {color:#dbe3ee;}
-        .tns-brand {
-            display:flex !important;
-            align-items:center !important;
-            gap:12px !important;
-            padding:4px 0 22px !important;
-        }
-        .tns-brand img {
-            width:46px !important;
-            height:46px !important;
-            flex:0 0 46px !important;
-            border-radius:12px !important;
-            object-fit:contain !important;
-            background:#fff !important;
-            border:1px solid rgba(255,255,255,.12) !important;
-        }
-        .tns-brand-name {
-            font-size:17px !important;
-            font-weight:700 !important;
-            line-height:1.15 !important;
-            color:#fff !important;
-            white-space:nowrap !important;
-        }
-        .section-label {
-            font-size:11px !important;
-            font-weight:700 !important;
-            text-transform:uppercase !important;
-            letter-spacing:.8px !important;
-            color:#91a0b5 !important;
-            margin:18px 0 9px !important;
-        }
-        [data-testid="stSidebar"] .stButton {margin:0 !important;}
+        [data-testid="stSidebar"] {background:#111827; min-width:270px; max-width:270px;}
+        [data-testid="stSidebar"] * {color:#d1d5db;}
         [data-testid="stSidebar"] .stButton button {
-            width:100% !important;
-            min-height:42px !important;
-            padding:8px 13px !important;
-            display:flex !important;
-            align-items:center !important;
-            justify-content:flex-start !important;
-            text-align:left !important;
-            background:#1d2939 !important;
-            color:#f8fafc !important;
-            border:1px solid #334155 !important;
-            border-radius:10px !important;
-            box-shadow:none !important;
-            overflow:hidden !important;
-        }
-        [data-testid="stSidebar"] .stButton button:hover {
-            background:#273449 !important;
-            border-color:#4b5d74 !important;
+            justify-content:flex-start; text-align:left;
+            border:1px solid #374151; background:#1f2937; color:white;
+            border-radius:9px; min-height:38px;
         }
         [data-testid="stSidebar"] .stButton button p {
-            width:100% !important;
-            overflow:hidden !important;
-            text-overflow:ellipsis !important;
-            white-space:nowrap !important;
-            color:#f8fafc !important;
-            font-size:13px !important;
-            margin:0 !important;
+            overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:13px; color:#e5e7eb;
         }
+        [data-testid="stSidebar"] .stButton button:hover {background:#374151; border-color:#4b5563;}
         [data-testid="stSidebar"] .stButton button[kind="primary"],
         [data-testid="stSidebar"] .stButton button[data-testid="stBaseButton-primary"] {
-            background:#39475a !important;
-            border-color:#637187 !important;
+            background:#374151; border-color:#6b7280;
         }
-        [data-testid="stSidebar"] [data-testid="column"] {padding:0 !important;}
-        [data-testid="stSidebar"] [data-testid="column"]:last-child .stButton button {
-            width:40px !important;
-            min-width:40px !important;
-            padding:0 !important;
-            justify-content:center !important;
-            text-align:center !important;
-        }
-        [data-testid="stSidebar"] [data-testid="column"]:last-child .stButton button p {
-            text-align:center !important;
-            font-size:13px !important;
-        }
-        [data-testid="stSidebar"] hr {
-            border-color:#334155 !important;
-            margin:26px 0 18px !important;
-        }
-        [data-testid="stSidebar"] [data-testid="stCaptionContainer"] p {
-            color:#9eacbf !important;
-            font-size:13px !important;
-        }
+        .tns-brand {display:flex;align-items:center;gap:10px;padding:4px 0 18px;}
+        .tns-brand img {width:38px;height:38px;border-radius:9px;object-fit:contain;background:white;}
+        .tns-brand-name {font-weight:650;font-size:16px;color:white !important;}
+        .section-label {font-size:11px;font-weight:650;text-transform:uppercase;letter-spacing:.7px;color:#9ca3af;margin:14px 0 7px;}
 
-        /* ---------- top conversation header ---------- */
-        .tns-header {
-            width:100% !important;
-            min-height:72px !important;
-            display:flex !important;
-            flex-direction:column !important;
-            justify-content:center !important;
-            padding:0 22px !important;
-            margin:0 0 26px !important;
-            background:#fff !important;
-            border:1px solid #e5e9ef !important;
-            border-radius:0 !important;
-            box-shadow:0 1px 2px rgba(15,23,42,.025) !important;
-        }
-        .tns-header-title {
-            color:#172033 !important;
-            font-size:17px !important;
-            font-weight:700 !important;
-            line-height:1.25 !important;
-        }
-        .tns-header-subtitle {
-            color:#98a2b3 !important;
-            font-size:12px !important;
-            line-height:1.3 !important;
-            margin-top:5px !important;
-        }
+        /* ---------- header / welcome ---------- */
+        .tns-header {border-bottom:1px solid #e5e7eb; padding:2px 0 14px; margin-bottom:20px;}
+        .tns-header-title {font-weight:600;font-size:16px;color:#172033;}
+        .tns-header-subtitle {font-size:11px;color:#9ca3af;margin-top:2px;}
+        .welcome {text-align:center;margin:14vh auto 8vh;}
+        .welcome h1 {font-size:30px;letter-spacing:-.5px;color:#172033;margin-bottom:10px;}
+        .welcome p {font-size:14px;color:#6b7280;}
 
-        /* ---------- welcome ---------- */
-        .welcome {
-            max-width:720px !important;
-            text-align:center !important;
-            margin:150px auto 120px !important;
-        }
-        .welcome h1 {
-            color:#172033 !important;
-            font-size:31px !important;
-            font-weight:750 !important;
-            letter-spacing:-.7px !important;
-            margin:0 0 12px !important;
-        }
-        .welcome p {
-            color:#7b8798 !important;
-            font-size:14px !important;
-            margin:0 !important;
-        }
-
-        /* ---------- chat messages ---------- */
-        [data-testid="stChatMessage"] {
-            width:100% !important;
-            max-width:100% !important;
-            background:transparent !important;
-            border:0 !important;
-            padding:0 !important;
-            margin:0 0 20px !important;
-            gap:0 !important;
-        }
+        /* ---------- chat bubbles ---------- */
+        [data-testid="stChatMessage"] {background:transparent; padding:0; gap:0; margin-bottom:16px;}
         [data-testid^="stChatMessageAvatar"] {display:none !important;}
-
-        /* User: compact right-aligned bubble, like the FastAPI UI. */
         [data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarUser"]) {
-            width:fit-content !important;
-            max-width:78% !important;
-            margin-left:auto !important;
-            margin-right:0 !important;
-            padding:0 !important;
-            background:transparent !important;
+            background:#111827; border-radius:14px 14px 4px 14px;
+            padding:12px 16px; margin-left:20%;
         }
-        [data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarUser"]) > div:last-child {
-            width:fit-content !important;
-            max-width:100% !important;
-            padding:11px 17px !important;
-            background:#111827 !important;
-            border:1px solid #111827 !important;
-            border-radius:15px 15px 4px 15px !important;
-            box-shadow:0 2px 5px rgba(15,23,42,.08) !important;
-        }
-        [data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarUser"]) p,
-        [data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarUser"]) span,
-        [data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarUser"]) div {
-            color:#fff !important;
-            font-size:14px !important;
-            line-height:1.5 !important;
-        }
-
-        /* Assistant: broad white response card. */
+        [data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarUser"]) * {color:#ffffff !important;}
         [data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarAssistant"]) {
-            width:100% !important;
-            background:#fff !important;
-            border:1px solid #e1e6ed !important;
-            border-radius:15px !important;
-            padding:18px 20px !important;
-            box-shadow:0 2px 7px rgba(15,23,42,.035) !important;
-            overflow:visible !important;
+            background:#ffffff; border:1px solid #e5e7eb;
+            border-radius:14px 14px 14px 4px; padding:14px 18px; color:#1f2937;
         }
-        [data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarAssistant"]) p,
-        [data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarAssistant"]) li {
-            color:#263244 !important;
-            font-size:14px !important;
-            line-height:1.65 !important;
+        [data-testid="stChatMessage"] h1 {font-size:20px; margin:14px 0 6px;}
+        [data-testid="stChatMessage"] h2 {font-size:17px; margin:14px 0 6px;}
+        [data-testid="stChatMessage"] h3 {font-size:15px; margin:14px 0 6px;}
+        [data-testid="stChatMessage"] h4 {font-size:14px; margin:12px 0 6px;}
+        [data-testid="stChatMessage"] p, [data-testid="stChatMessage"] li {font-size:14px; line-height:1.6;}
+        [data-testid="stChatMessage"] table {border-collapse:collapse; font-size:13px; margin:8px 0 10px;}
+        [data-testid="stChatMessage"] th, [data-testid="stChatMessage"] td {
+            border:1px solid #e5e7eb !important; padding:6px 10px !important; text-align:left;
         }
-        [data-testid="stChatMessage"] h1 {font-size:21px !important;margin:12px 0 8px !important;color:#172033 !important;}
-        [data-testid="stChatMessage"] h2 {font-size:18px !important;margin:14px 0 7px !important;color:#172033 !important;}
-        [data-testid="stChatMessage"] h3 {font-size:16px !important;margin:13px 0 6px !important;color:#172033 !important;}
-        [data-testid="stChatMessage"] h4 {font-size:14px !important;margin:11px 0 5px !important;color:#172033 !important;}
-        [data-testid="stChatMessage"] table {
-            width:100% !important;
-            border-collapse:separate !important;
-            border-spacing:0 !important;
-            overflow:hidden !important;
-            border:1px solid #e5e7eb !important;
-            border-radius:9px !important;
-            font-size:13px !important;
-            margin:10px 0 12px !important;
-        }
-        [data-testid="stChatMessage"] th,
-        [data-testid="stChatMessage"] td {
-            border-right:1px solid #e5e7eb !important;
-            border-bottom:1px solid #e5e7eb !important;
-            padding:8px 10px !important;
-            color:#263244 !important;
-            background:#fff !important;
-        }
-        [data-testid="stChatMessage"] th {
-            background:#f7f9fc !important;
-            font-weight:700 !important;
-        }
-        [data-testid="stChatMessage"] sup {font-size:10px !important;color:#2563eb !important;font-weight:700 !important;}
+        [data-testid="stChatMessage"] th {background:#f9fafb !important; font-weight:700;}
+        [data-testid="stChatMessage"] sup {font-size:10px; color:#2563eb; font-weight:700; padding:0 1px;}
 
-        /* ---------- chart / table cards ---------- */
+        /* ---------- cards, buttons ---------- */
         [data-testid="stChatMessage"] [data-testid="stVerticalBlockBorderWrapper"] {
-            width:100% !important;
-            background:#fff !important;
-            border:1px solid #dfe5ec !important;
-            border-radius:12px !important;
-            padding:0 !important;
-            overflow:hidden !important;
-            box-shadow:none !important;
-            margin:10px 0 16px !important;
+            border-radius:12px; background:#ffffff;
         }
-        [data-testid="stChatMessage"] [data-testid="stVerticalBlockBorderWrapper"] > div {
-            padding:0 !important;
-        }
-        [data-testid="stPlotlyChart"] {
-            width:100% !important;
-            margin:0 !important;
-            padding:0 !important;
-        }
-        [data-testid="stPlotlyChart"] iframe {border-radius:0 !important;}
-
-        /* ---------- main-area buttons / downloads ---------- */
         [data-testid="stMain"] .stButton button,
         [data-testid="stMain"] .stDownloadButton button,
         section.main .stButton button,
         section.main .stDownloadButton button {
-            min-height:34px !important;
-            padding:6px 13px !important;
-            border:1px solid #cfd6df !important;
-            border-radius:8px !important;
-            background:#fff !important;
-            color:#344054 !important;
-            font-size:12px !important;
-            font-weight:550 !important;
-            box-shadow:none !important;
+            border:1px solid #d1d5db; background:#ffffff; color:#374151;
+            border-radius:999px; font-size:12px; padding:3px 12px; min-height:32px;
         }
         [data-testid="stMain"] .stButton button:hover,
-        [data-testid="stMain"] .stDownloadButton button:hover {
-            background:#f7f9fc !important;
-            border-color:#aeb8c6 !important;
-            color:#172033 !important;
-        }
-        [data-testid="stMain"] .stButton button p,
-        [data-testid="stMain"] .stDownloadButton button p {
-            font-size:12px !important;
-            margin:0 !important;
-        }
-        /* Align button rows instead of allowing Streamlit's default vertical padding to drift. */
-        [data-testid="stChatMessage"] [data-testid="column"] {
-            display:flex !important;
-            align-items:flex-start !important;
-        }
-        [data-testid="stChatMessage"] [data-testid="column"] .stButton,
-        [data-testid="stChatMessage"] [data-testid="column"] .stDownloadButton {
-            width:100% !important;
-            margin:0 !important;
-        }
-
-        /* ---------- thought process ---------- */
-        [data-testid="stExpander"] {
-            border:1px solid #e2e7ee !important;
-            border-radius:10px !important;
-            background:#fff !important;
-            margin:4px 0 14px !important;
-            box-shadow:none !important;
-        }
-        [data-testid="stExpander"] summary {
-            background:#fff !important;
-            color:#344054 !important;
-            min-height:42px !important;
-            padding:0 13px !important;
-        }
-        [data-testid="stExpander"] summary:hover {background:#f8fafc !important;}
-        [data-testid="stExpander"] summary p {font-size:13px !important;color:#344054 !important;}
+        [data-testid="stMain"] .stDownloadButton button:hover {background:#f1f5f9; border-color:#cbd5e1; color:#111827;}
+        [data-testid="stMain"] .stButton button p, [data-testid="stMain"] .stDownloadButton button p {font-size:12px;}
 
         /* ---------- login ---------- */
         [data-testid="stForm"] {
-            width:100% !important;
-            max-width:480px !important;
-            margin:11vh auto 0 !important;
-            padding:34px 36px 30px !important;
-            background:#fff !important;
-            border:1px solid #e2e7ee !important;
-            border-radius:18px !important;
-            box-shadow:0 18px 50px rgba(15,23,42,.08) !important;
+            max-width:430px !important; margin:12vh auto 0 !important; padding:32px !important;
+            background:#ffffff !important; border:1px solid #e5e7eb !important;
+            border-radius:16px !important; box-shadow:0 15px 40px rgba(0,0,0,.07) !important;
         }
         [data-testid="stForm"] [data-testid="stTextInput"] label,
         [data-testid="stForm"] [data-testid="stTextInput"] label p {
-            color:#344054 !important;
-            font-size:13px !important;
-            font-weight:600 !important;
+            color:#374151 !important; font-size:13px !important; font-weight:600 !important;
         }
         [data-testid="stForm"] [data-testid="stTextInput"] input {
-            height:44px !important;
-            color:#111827 !important;
-            -webkit-text-fill-color:#111827 !important;
-            background:#fff !important;
-            border:1px solid #cfd6df !important;
-            border-radius:9px !important;
+            color:#111827 !important; -webkit-text-fill-color:#111827 !important;
+            background:#ffffff !important; border:1px solid #d1d5db !important; border-radius:9px !important;
         }
         [data-testid="stForm"] button {
-            min-height:44px !important;
-            color:#fff !important;
-            -webkit-text-fill-color:#fff !important;
-            background:#111827 !important;
-            border:1px solid #111827 !important;
-            border-radius:9px !important;
-            font-weight:650 !important;
+            color:#ffffff !important; -webkit-text-fill-color:#ffffff !important;
+            background:#111827 !important; border:1px solid #111827 !important;
+            border-radius:9px !important; font-weight:600 !important;
         }
-        .login-logo {
-            display:block !important;
-            width:64px !important;
-            height:64px !important;
-            object-fit:contain !important;
-            margin:0 auto 16px !important;
-            border-radius:12px !important;
-            background:#fff !important;
-            border:1px solid #e5e7eb !important;
-        }
-        .login-title {text-align:center !important;font-size:25px !important;font-weight:750 !important;color:#172033 !important;margin:0 0 7px !important;}
-        .login-sub {text-align:center !important;color:#667085 !important;font-size:14px !important;margin:0 0 28px !important;}
-        .login-heading {text-align:center !important;}
+        .login-logo {display:block;width:72px;height:72px;object-fit:contain;margin:0 auto 14px;border-radius:14px;background:#ffffff;border:1px solid #e5e7eb;box-shadow:0 2px 8px rgba(0,0,0,.06);}
+        .login-title{text-align:center;font-size:24px;font-weight:700;color:#172033;margin:0 0 7px;}
+        .login-sub{text-align:center;color:#6b7280;font-size:14px;margin:0 0 28px;}
+        .login-heading {text-align:center;}
 
-        /* ---------- fixed chat composer ---------- */
-        [data-testid="stBottom"], [data-testid="stBottom"] > div {
-            background:rgba(245,247,251,.96) !important;
-            backdrop-filter:blur(10px) !important;
-        }
-        [data-testid="stBottomBlockContainer"] {
-            max-width:1120px !important;
-            padding:10px 28px 16px !important;
-        }
+        /* ---------- chat composer ---------- */
+        [data-testid="stBottom"], [data-testid="stBottom"] > div {background:#f5f7fb !important;}
         [data-testid="stChatInput"] {
-            width:100% !important;
-            background:#fff !important;
-            border:1px solid #cfd6df !important;
-            border-radius:14px !important;
-            box-shadow:0 5px 18px rgba(15,23,42,.08) !important;
-            min-height:62px !important;
+            background:#ffffff !important; border:1px solid #d1d5db !important;
+            border-radius:14px !important; box-shadow:0 4px 15px rgba(0,0,0,.05) !important;
         }
-        [data-testid="stChatInput"] > div {
-            background:#fff !important;
-            border:0 !important;
+        [data-testid="stChatInput"] textarea, [data-testid="stChatInput"] input,
+        [data-testid="stChatInput"] textarea:focus, [data-testid="stChatInput"] input:focus {
+            color:#111827 !important; -webkit-text-fill-color:#111827 !important;
+            caret-color:#111827 !important; background:#ffffff !important;
         }
-        [data-testid="stChatInput"] textarea,
-        [data-testid="stChatInput"] input,
-        [data-testid="stChatInput"] textarea:focus,
-        [data-testid="stChatInput"] input:focus {
-            min-height:46px !important;
-            color:#111827 !important;
-            -webkit-text-fill-color:#111827 !important;
-            caret-color:#111827 !important;
-            background:#fff !important;
-            font-size:15px !important;
+        [data-testid="stChatInput"] textarea::placeholder, [data-testid="stChatInput"] input::placeholder {
+            color:#6b7280 !important; -webkit-text-fill-color:#6b7280 !important; opacity:1 !important;
         }
-        [data-testid="stChatInput"] textarea::placeholder,
-        [data-testid="stChatInput"] input::placeholder {
-            color:#7b8798 !important;
-            -webkit-text-fill-color:#7b8798 !important;
-            opacity:1 !important;
-        }
-        [data-testid="stChatInput"] button {
-            width:42px !important;
-            height:42px !important;
-            min-width:42px !important;
-            margin-right:5px !important;
-            border-radius:10px !important;
-            background:#111827 !important;
-            border:1px solid #111827 !important;
-        }
-        [data-testid="stChatInput"] button:hover {background:#1f2937 !important;}
-        [data-testid="stChatInput"] button svg {fill:#fff !important;color:#fff !important;}
 
-        /* ---------- responsive ---------- */
-        @media (max-width: 900px) {
-            [data-testid="stSidebar"] {min-width:260px !important;max-width:260px !important;}
-            [data-testid="stMainBlockContainer"], .block-container {
-                max-width:100% !important;
-                padding-left:16px !important;
-                padding-right:16px !important;
-            }
-            [data-testid="stBottomBlockContainer"] {padding-left:16px !important;padding-right:16px !important;}
-            [data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarUser"]) {max-width:88% !important;}
+        /* =====================================================
+           FORCE A READABLE LIGHT UI
+           Streamlit follows the visitor's system theme. In dark mode it paints
+           text near-white, which is invisible on our white cards. Everything
+           below pins colours explicitly so the app reads correctly either way.
+           ===================================================== */
+        .stApp {color-scheme: light;}
+        .stApp [data-testid="stMain"], .stApp section.main {color:#1f2937;}
+
+        .stApp [data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarAssistant"])
+            :is(p, li, span, div, h1, h2, h3, h4, h5, h6, td, th, label, strong, em, b, i, summary, small) {
+            color:#1f2937 !important;
         }
-        @media (max-width: 640px) {
-            [data-testid="stSidebar"] {min-width:240px !important;max-width:240px !important;}
-            .tns-brand-name {font-size:15px !important;}
-            .tns-header {padding:0 16px !important;}
-            .welcome {margin:100px auto 80px !important;}
-            .welcome h1 {font-size:26px !important;}
-            [data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarUser"]) {max-width:94% !important;}
-            [data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarAssistant"]) {padding:14px !important;}
+        .stApp [data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarUser"])
+            :is(p, li, span, div, h1, h2, h3, h4, h5, h6, strong, em, a, code) {
+            color:#ffffff !important;
         }
+        .stApp.stApp [data-testid="stChatMessage"] [data-testid="stCaptionContainer"],
+        .stApp.stApp [data-testid="stChatMessage"] [data-testid="stCaptionContainer"] * {color:#6b7280 !important;}
+        .stApp.stApp [data-testid="stChatMessage"] sup {color:#2563eb !important; font-weight:700;}
+        .stApp.stApp [data-testid="stChatMessage"] a {color:#2563eb !important;}
+        .stApp.stApp [data-testid="stChatMessage"] .section-label {color:#9ca3af !important;}
+        .stApp.stApp [data-testid="stChatMessage"] th {background:#f9fafb !important;}
+        .stApp.stApp [data-testid="stChatMessage"] table {background:#ffffff !important;}
+        .stApp.stApp [data-testid="stChatMessage"] code,
+        .stApp.stApp [data-testid="stChatMessage"] [data-testid="stCode"],
+        .stApp.stApp [data-testid="stChatMessage"] [data-testid="stCode"] pre,
+        .stApp.stApp [data-testid="stChatMessage"] [data-testid="stCode"] * {
+            background:#f3f4f6 !important; color:#111827 !important;
+        }
+
+        /* cards / expanders */
+        .stApp [data-testid="stChatMessage"] [data-testid="stVerticalBlockBorderWrapper"] {
+            background:#ffffff !important; border-color:#e5e7eb !important;
+        }
+        .stApp [data-testid="stExpander"], .stApp [data-testid="stExpander"] details,
+        .stApp [data-testid="stExpander"] summary {
+            background:#ffffff !important; border-color:#e5e7eb !important;
+        }
+        .stApp [data-testid="stExpander"] summary:hover {background:#f9fafb !important;}
+
+        /* pill buttons in the main area (downloads, suggestions, full CSV) */
+        .stApp [data-testid="stMain"] :is(.stButton, .stDownloadButton, [data-testid="stDownloadButton"]) button,
+        .stApp section.main :is(.stButton, .stDownloadButton) button {
+            background:#ffffff !important; color:#374151 !important;
+            border:1px solid #d1d5db !important; border-radius:999px !important;
+        }
+        .stApp [data-testid="stMain"] :is(.stButton, .stDownloadButton, [data-testid="stDownloadButton"]) button:hover {
+            background:#f1f5f9 !important; border-color:#9ca3af !important;
+        }
+        .stApp [data-testid="stMain"] :is(.stButton, .stDownloadButton, [data-testid="stDownloadButton"]) button * {
+            color:#374151 !important;
+        }
+
+        /* chat composer: the dark rounded bar came from an inner wrapper */
+        .stApp [data-testid="stChatInput"],
+        .stApp [data-testid="stChatInput"] div,
+        .stApp [data-testid="stChatInput"] textarea {
+            background:#ffffff !important; color:#111827 !important;
+            -webkit-text-fill-color:#111827 !important; caret-color:#111827 !important;
+        }
+        .stApp [data-testid="stChatInput"] {border:1px solid #d1d5db !important; border-radius:14px !important;}
+        .stApp [data-testid="stChatInput"] div {border-color:transparent !important;}
+        .stApp [data-testid="stChatInput"] textarea::placeholder {
+            color:#6b7280 !important; -webkit-text-fill-color:#6b7280 !important; opacity:1 !important;
+        }
+        .stApp [data-testid="stChatInput"] button {background:#111827 !important;}
+        .stApp [data-testid="stChatInput"] button svg {fill:#ffffff !important; color:#ffffff !important;}
+        .stApp [data-testid="stBottom"], .stApp [data-testid="stBottom"] > div {background:#f5f7fb !important;}
         </style>
         """,
         unsafe_allow_html=True,
@@ -572,13 +318,50 @@ def normalize_name(name: Any) -> str:
 def is_numeric_value(value: Any) -> bool:
     if value is None or value == "":
         return False
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        try:
+            return math.isfinite(float(value))
+        except (TypeError, ValueError):
+            return False
     text = str(value).strip()
-    if not _NUMERIC_RE.match(text):
-        return False
+    if _NUMERIC_RE.match(text):
+        try:
+            return math.isfinite(float(text))
+        except ValueError:
+            return False
+    # Accept display-formatted numeric values as a charting fallback.
+    # Examples: 4K, 2.5M, ₹1,23,456, 4,000, 12.5%.
+    cleaned = text.replace(",", "").replace("₹", "").replace("%", "").strip()
+    multiplier = 1.0
+    if cleaned and cleaned[-1:].upper() in {"K", "M", "B", "L", "C"}:
+        suffix = cleaned[-1].upper()
+        cleaned = cleaned[:-1].strip()
+        multiplier = {"K": 1_000.0, "M": 1_000_000.0, "B": 1_000_000_000.0,
+                      "L": 100_000.0, "C": 10_000_000.0}[suffix]
     try:
-        return math.isfinite(float(text))
-    except ValueError:
+        return math.isfinite(float(cleaned) * multiplier)
+    except (TypeError, ValueError):
         return False
+
+
+def numeric_value(value: Any) -> Optional[float]:
+    if value is None or value == "":
+        return None
+    try:
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            number = float(value)
+            return number if math.isfinite(number) else None
+        text = str(value).strip().replace(",", "").replace("₹", "").replace("%", "").strip()
+        multiplier = 1.0
+        if text and text[-1:].upper() in {"K", "M", "B", "L", "C"}:
+            suffix = text[-1].upper()
+            text = text[:-1].strip()
+            multiplier = {"K": 1_000.0, "M": 1_000_000.0, "B": 1_000_000_000.0,
+                          "L": 100_000.0, "C": 10_000_000.0}[suffix]
+        number = float(text) * multiplier
+        return number if math.isfinite(number) else None
+    except (TypeError, ValueError):
+        return None
 
 
 def is_quantity_column(name: Any) -> bool:
@@ -1051,8 +834,8 @@ def build_chart_spec(table: Dict[str, Any], viz: Dict[str, Any]) -> Optional[Dic
 
     numeric_columns = []
     for c in range(1, len(columns)):
-        values = [row[c] for row in rows if row[c] not in (None, "")]
-        if values and all(is_numeric_value(v) for v in values):
+        values = [numeric_value(row[c]) for row in rows if row[c] not in (None, "")]
+        if values and all(v is not None for v in values):
             numeric_columns.append(c)
     if not numeric_columns:
         return None
@@ -1082,7 +865,7 @@ def build_chart_spec(table: Dict[str, Any], viz: Dict[str, Any]) -> Optional[Dic
             "label": columns[c],
             "kind": column_kind(columns[c]),
             "hidden": c not in preferred_set,
-            "data": [float(row[c]) if is_numeric_value(row[c]) else None for row in rows],
+            "data": [numeric_value(row[c]) for row in rows],
         }
         for c in ordered[:5]
     ]
@@ -1131,19 +914,34 @@ def build_figure(spec: Dict[str, Any]):
         if spec["type"] == "line":
             fig.add_trace(go.Scatter(
                 x=labels, y=dataset["data"], mode="lines+markers",
-                line=dict(color=color, width=2), marker=dict(color=color, size=6),
+                line=dict(color=color, width=3),
+                marker=dict(color=color, size=7, line=dict(width=1, color="#ffffff")),
                 connectgaps=False, **common,
             ))
         elif horizontal:
-            fig.add_trace(go.Bar(y=labels, x=dataset["data"], orientation="h",
-                                 marker_color=color, **common))
+            fig.add_trace(go.Bar(
+                y=labels, x=dataset["data"], orientation="h",
+                marker=dict(color=color, line=dict(width=0)),
+                text=[format_chart_value(v, dataset["kind"]) for v in dataset["data"]],
+                textposition="auto", textfont=dict(color="#172033", size=11),
+                cliponaxis=False, **common,
+            ))
         else:
-            fig.add_trace(go.Bar(x=labels, y=dataset["data"], marker_color=color, **common))
+            fig.add_trace(go.Bar(
+                x=labels, y=dataset["data"],
+                marker=dict(color=color, line=dict(width=0)),
+                **common,
+            ))
 
     visible_values = [
         v for ds in spec["datasets"] if not ds["hidden"] for v in ds["data"] if v is not None
     ]
-    value_axis: Dict[str, Any] = dict(gridcolor="#eef0f3", zeroline=True, zerolinecolor="#d1d5db")
+    value_axis: Dict[str, Any] = dict(
+        gridcolor="#e5e7eb", gridwidth=1, zeroline=True, zerolinecolor="#cbd5e1",
+        tickfont=dict(color="#344054", size=11),
+        title_font=dict(color="#172033", size=12),
+        linecolor="#d0d5dd", linewidth=1,
+    )
     if visible_values:
         ticks = nice_ticks(min(0.0, min(visible_values)), max(0.0, max(visible_values)))
         if ticks:
@@ -1151,54 +949,49 @@ def build_figure(spec: Dict[str, Any]):
                 tickvals=ticks,
                 ticktext=[format_chart_value(t, spec["first_kind"]) for t in ticks],
             )
+
     category_axis: Dict[str, Any] = dict(
         type="category", categoryorder="array", categoryarray=labels,
         automargin=True, showgrid=False,
+        tickfont=dict(color="#344054", size=11),
+        linecolor="#d0d5dd", linewidth=1,
     )
 
-    height = max(340, len(labels) * 24 + 90) if horizontal else 340
-    visible_count = sum(1 for dataset in spec["datasets"] if not dataset["hidden"])
+    longest_label = max((len(str(label)) for label in labels), default=0)
+    if horizontal:
+        # Give long vendor/category labels real room instead of letting Plotly
+        # squeeze them against the plot area.
+        left_margin = min(430, max(150, longest_label * 6 + 35))
+        height = max(430, min(900, len(labels) * 31 + 130))
+        margin = dict(l=left_margin, r=55, t=80, b=55)
+    else:
+        margin = dict(l=70, r=35, t=75, b=75)
+        height = 390
+
     fig.update_layout(
         template="plotly_white",
-        height=max(380, height),
-        margin=dict(l=62, r=24, t=58, b=62),
+        height=height,
+        margin=margin,
         paper_bgcolor="#ffffff",
         plot_bgcolor="#ffffff",
-        showlegend=visible_count > 1 or len(spec["datasets"]) > 1,
+        showlegend=len(spec["datasets"]) > 1,
         legend=dict(
-            orientation="h",
-            yanchor="bottom", y=1.02,
+            orientation="h", yanchor="bottom", y=1.01,
             xanchor="left", x=0,
+            font=dict(color="#344054", size=11),
             bgcolor="rgba(255,255,255,0)",
-            borderwidth=0,
-            font=dict(size=12, color="#667085"),
-            itemclick="toggle",
-            itemdoubleclick="toggleothers",
         ),
         barmode="group",
         bargap=0.28,
-        bargroupgap=0.08,
-        hovermode="x unified" if spec["type"] == "line" and not horizontal else "closest",
-        font=dict(family="Inter, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif", size=12, color="#344054"),
-        hoverlabel=dict(bgcolor="#101828", font_color="#ffffff", bordercolor="#101828"),
-        dragmode="pan",
+        font=dict(family="Inter, -apple-system, Segoe UI, sans-serif", size=12, color="#172033"),
+        hoverlabel=dict(bgcolor="#111827", font_color="#ffffff", font_size=12),
     )
     if horizontal:
         fig.update_xaxes(**value_axis)
         fig.update_yaxes(autorange="reversed", **category_axis)
     else:
-        fig.update_yaxes(
-            **value_axis,
-            title_font=dict(size=12, color="#344054"),
-            tickfont=dict(size=11, color="#667085"),
-        )
-        fig.update_xaxes(
-            tickangle=-35 if len(labels) > 10 else 0,
-            **category_axis,
-            tickfont=dict(size=11, color="#667085"),
-            showline=True,
-            linecolor="#d0d5dd",
-        )
+        fig.update_yaxes(**value_axis)
+        fig.update_xaxes(tickangle=-45 if len(labels) > 10 else 0, **category_axis)
     return fig
 
 
@@ -1225,13 +1018,39 @@ def render_visualization(
                 spec = build_chart_spec(table, viz)
                 if spec:
                     figure = build_figure(spec)
-                    wide(st.plotly_chart, figure, key=f"chart_{key}", config={"displaylogo": False})
+                    wide(
+                        st.plotly_chart,
+                        figure,
+                        key=f"chart_{key}",
+                        config={
+                            "displaylogo": False,
+                            "responsive": True,
+                            "scrollZoom": True,
+                        },
+                    )
                     st.caption(f"Source: {table.get('title') or 'Query result'}")
                     with st.expander("View data"):
                         render_table(table, conversation_id, message_id, f"{key}_data")
+
+                    # Keep Genie's native visualization available as the exact
+                    # original rendering/download; it is an alternate view,
+                    # not a replacement for the clear interactive chart above.
+                    attachment_id = viz.get("attachment_id")
+                    if attachment_id and message_id:
+                        try:
+                            image = fetch_visualization_png(conversation_id, message_id, attachment_id)
+                            st.download_button(
+                                "⬇ Original Genie chart (PNG)",
+                                data=image,
+                                file_name="TNS_genie_visualization.png",
+                                mime="image/png",
+                                key=f"viz_original_dl_{key}",
+                            )
+                        except Exception as exc:
+                            logger.debug("Original Genie visualization unavailable: %s", exc)
                     return
             except Exception as exc:
-                logger.warning("Native chart failed, using TNS image: %s", exc)
+                logger.warning("Plotly chart failed; retaining native Genie visualization: %s", exc)
 
         attachment_id = viz.get("attachment_id")
         if not attachment_id or not message_id:
