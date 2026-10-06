@@ -55,6 +55,30 @@ def inject_css():
         .login-title{text-align:center;font-size:26px;font-weight:700;color:#172033;}
         .login-sub{text-align:center;color:#6b7280;font-size:13px;margin:7px 0 24px;}
         div[data-testid="stChatMessage"] {background:transparent;}
+
+        /* Keep typed text visible in Streamlit's native chat input. */
+        [data-testid="stChatInput"] textarea,
+        [data-testid="stChatInput"] input {
+            color: #172033 !important;
+            -webkit-text-fill-color: #172033 !important;
+            caret-color: #172033 !important;
+            background: #ffffff !important;
+        }
+        [data-testid="stChatInput"] textarea::placeholder,
+        [data-testid="stChatInput"] input::placeholder {
+            color: #6b7280 !important;
+            -webkit-text-fill-color: #6b7280 !important;
+            opacity: 1 !important;
+        }
+        [data-testid="stTextInput"] input {
+            color: #172033 !important;
+            -webkit-text-fill-color: #172033 !important;
+            background: #ffffff !important;
+        }
+        [data-testid="stTextInput"] input::placeholder {
+            color: #6b7280 !important;
+            -webkit-text-fill-color: #6b7280 !important;
+        }
         </style>
         """,
         unsafe_allow_html=True,
@@ -201,40 +225,75 @@ def render_visualization(viz: Dict[str, Any], conversation_id: str, message_id: 
 
 
 def render_presentation(presentation: Dict[str, Any], conversation_id: str, message_id: str):
+    """Render the same ordered Agent presentation structure as the working web UI."""
     if not presentation:
         return
 
+    blocks = presentation.get("blocks") or []
+
+    # Agent mode: preserve the exact block order returned by Genie.
+    # This is important: the working web app renders thoughts/tables/charts/
+    # suggestions in the order supplied by the Agent, rather than grouping them
+    # by type.
+    if blocks:
+        rendered_table_attachments = set()
+        chart_source_ids = {
+            (block.get("data") or {}).get("query_attachment_id")
+            for block in blocks
+            if block.get("type") == "visualization"
+            and (block.get("data") or {}).get("query_attachment_id")
+        }
+
+        for index, block in enumerate(blocks):
+            block_type = block.get("type")
+            data = block.get("data") or {}
+
+            if block_type == "thoughts":
+                render_thoughts(data)
+            elif block_type == "visualization":
+                render_visualization(data, conversation_id, message_id)
+            elif block_type == "table":
+                attachment_id = data.get("attachment_id")
+                if attachment_id in chart_source_ids:
+                    continue
+                if attachment_id and attachment_id in rendered_table_attachments:
+                    continue
+                if attachment_id:
+                    rendered_table_attachments.add(attachment_id)
+                render_table(data, conversation_id, message_id)
+            elif block_type == "suggested_questions":
+                suggestions = data if isinstance(data, list) else []
+                if suggestions:
+                    st.markdown('<div class="section-label">Suggested questions</div>', unsafe_allow_html=True)
+                    for suggestion_index, question in enumerate(suggestions):
+                        if st.button(
+                            question,
+                            key=f"suggestion_{message_id}_{index}_{suggestion_index}",
+                            use_container_width=True,
+                        ):
+                            st.session_state.pending_prompt = question
+                            st.rerun()
+        return
+
+    # Backward-compatible rendering for messages saved in the older
+    # presentation format.
     thoughts = presentation.get("thoughts") or []
-    if not thoughts:
-        for block in presentation.get("blocks") or []:
-            if block.get("type") == "thoughts":
-                thoughts = block.get("data") or []
-                break
-    render_thoughts(thoughts)
+    if thoughts:
+        render_thoughts(thoughts)
 
     visualizations = presentation.get("visualizations") or []
-    if not visualizations:
-        visualizations = [b.get("data") for b in presentation.get("blocks") or [] if b.get("type") == "visualization"]
     for viz in visualizations:
         render_visualization(viz, conversation_id, message_id)
 
-    tables = presentation.get("tables") or []
-    if not tables:
-        tables = [b.get("data") for b in presentation.get("blocks") or [] if b.get("type") == "table"]
     chart_source_ids = {
         v.get("query_attachment_id") for v in visualizations if v.get("query_attachment_id")
     }
-    for table in tables:
+    for table in presentation.get("tables") or []:
         if table.get("attachment_id") in chart_source_ids:
             continue
         render_table(table, conversation_id, message_id)
 
     suggestions = presentation.get("suggested_questions") or []
-    if not suggestions:
-        for block in presentation.get("blocks") or []:
-            if block.get("type") == "suggested_questions":
-                suggestions = block.get("data") or []
-                break
     if suggestions:
         st.markdown('<div class="section-label">Suggested questions</div>', unsafe_allow_html=True)
         for index, question in enumerate(suggestions):
@@ -251,11 +310,19 @@ def render_message(message: Dict[str, Any], conversation_id: str):
         return
 
     st.markdown("<div class='assistant-bubble'>", unsafe_allow_html=True)
-    st.markdown(content)
-    st.markdown("</div>", unsafe_allow_html=True)
     presentation = message.get("presentation") or message.get("metadata") or {}
     message_id = presentation.get("agent_message_id") or message.get("message_id") or ""
-    render_presentation(presentation, conversation_id, message_id)
+
+    # Match the working web app: Agent-mode rich blocks are rendered BEFORE
+    # the final answer; legacy Chat-mode rich blocks remain AFTER the answer.
+    if presentation.get("mode") == "agent":
+        render_presentation(presentation, conversation_id, message_id)
+        st.markdown(content)
+    else:
+        st.markdown(content)
+        render_presentation(presentation, conversation_id, message_id)
+
+    st.markdown("</div>", unsafe_allow_html=True)
 
 
 async def run_agent_turn(client: GenieClient, message: str, conversation_id: Optional[str]):
