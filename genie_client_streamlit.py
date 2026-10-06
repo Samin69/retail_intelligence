@@ -721,7 +721,10 @@ class GenieClient:
         """
         message: Optional[Dict[str, Any]] = None
 
-        for attempt in range(4):
+        # The message can become COMPLETED slightly before its visualization
+        # attachment is exposed by the Conversation API. Keep polling briefly
+        # so native Genie charts are not mistaken for missing visualizations.
+        for attempt in range(8):
             messages = await self.get_agent_messages(conversation_id)
             self._dump_debug("messages", conversation_id, messages)
 
@@ -729,10 +732,25 @@ class GenieClient:
             if message is None:
                 return None
 
-            if str(message.get("status", "")).upper() == "COMPLETED":
+            status = str(message.get("status", "")).upper()
+            attachments = message.get("attachments") or []
+            has_viz = any(
+                isinstance(a, dict)
+                and isinstance(a.get("viz"), dict)
+                and bool(a.get("viz", {}).get("attachment_id"))
+                for a in attachments
+            )
+
+            if status == "COMPLETED" and has_viz:
                 break
 
-            await asyncio.sleep(1.0)
+            # If there is no visualization, do not make the user wait through
+            # the entire retry window. One extra poll handles the common
+            # projection lag while keeping text/table-only answers fast.
+            if status == "COMPLETED" and attempt >= 1 and not has_viz:
+                break
+
+            await asyncio.sleep(0.75)
 
         if message is not None:
             logger.info(
@@ -839,10 +857,12 @@ class GenieClient:
                                 suggested_questions.append(question)
 
                     if viz and agent_message_id:
-                        viz_attachment_id = (
-                            viz.get("attachment_id")
-                            or attachment_id
-                        )
+                        # IMPORTANT: the visualization has its own attachment_id.
+                        # Do NOT fall back to the parent attachment_id here.
+                        # The parent attachment is normally the SQL/query attachment,
+                        # and using it with /download-visualization can return a
+                        # rendered table instead of the actual Genie chart.
+                        viz_attachment_id = viz.get("attachment_id")
                         if viz_attachment_id:
                             visualization = {
                                 "title": viz.get("title") or "Visualization",
