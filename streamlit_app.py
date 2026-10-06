@@ -156,7 +156,22 @@ def inject_css():
         .login-heading {text-align:center;}
 
         /* ---------- chat composer ---------- */
-        [data-testid="stBottom"], [data-testid="stBottom"] > div {background:#f5f7fb !important;}
+        /* Keep the Streamlit composer aligned with the same content column as
+           the chat cards instead of stretching it across the viewport. */
+        [data-testid="stBottom"] {
+            background:#f5f7fb !important;
+            border-top:0 !important;
+        }
+        [data-testid="stBottom"] > div {
+            max-width:1024px !important;
+            width:calc(100% - 32px) !important;
+            margin:0 auto !important;
+            padding:0 0 12px 0 !important;
+        }
+        [data-testid="stBottom"] [data-testid="stChatInput"] {
+            width:100% !important;
+            margin:0 !important;
+        }
         [data-testid="stChatInput"] {
             background:#ffffff !important; border:1px solid #d1d5db !important;
             border-radius:14px !important; box-shadow:0 4px 15px rgba(0,0,0,.05) !important;
@@ -958,22 +973,12 @@ def build_figure(spec: Dict[str, Any]):
             fig.add_trace(go.Bar(
                 y=labels, x=dataset["data"], orientation="h",
                 marker=dict(color=color, line=dict(width=0)),
-                text=[format_compact_chart_value(v, dataset["kind"]) for v in dataset["data"]],
-                textposition="outside",
-                textfont=dict(color="#172033", size=10),
-                cliponaxis=False,
-                constraintext="none",
                 **common,
             ))
         else:
             fig.add_trace(go.Bar(
                 x=labels, y=dataset["data"],
                 marker=dict(color=color, line=dict(width=0)),
-                text=[format_compact_chart_value(v, dataset["kind"]) for v in dataset["data"]],
-                textposition="outside",
-                textfont=dict(color="#172033", size=10),
-                cliponaxis=False,
-                constraintext="none",
                 **common,
             ))
 
@@ -1033,15 +1038,14 @@ def build_figure(spec: Dict[str, Any]):
         hoverlabel=dict(bgcolor="#111827", font_color="#ffffff", font_size=12),
     )
     if horizontal:
-        # Reserve a little room for outside data labels. Keep zero as the
-        # baseline for business charts while preventing labels from being
-        # clipped at the right edge.
+        # Keep a clean quantitative scale. Data labels are intentionally
+        # omitted from bars; values remain available through hover.
         if visible_values:
             positive_max = max(visible_values)
             negative_min = min(visible_values)
             span = max(abs(positive_max), abs(negative_min), 1.0)
-            pad = span * 0.12
-            value_axis["range"] = [min(0.0, negative_min) - pad * 0.15, positive_max + pad]
+            pad = span * 0.05
+            value_axis["range"] = [min(0.0, negative_min) - pad * 0.10, positive_max + pad]
         fig.update_xaxes(**value_axis)
         fig.update_yaxes(autorange="reversed", **category_axis)
     else:
